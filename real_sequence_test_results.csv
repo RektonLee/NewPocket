@@ -1,0 +1,5 @@
+sample_id,length,success,is_dummy,time_seconds,pdb_lines,error
+DLKcat_001,266,False,True,5.821244478225708,268,
+DLKcat_006,364,False,True,9.77512788772583,366,
+DLKcat_010,400,False,True,12.765663623809814,402,
+DLKcat_012,445,False,True,16.9335036277771,447,
