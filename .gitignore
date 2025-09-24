@@ -1,0 +1,39 @@
+# 忽略所有文件
+*
+
+# 只保留指定文件类型（包括子目录）
+!*.py
+!*.csv
+!*.xlsx
+!*.md
+!*.sh
+!.gitignore
+
+# 忽略特定目录和文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.log
+*.tmp
+*.temp
+.git/
+.cursorignore
+
+# 忽略数据目录
+sample_data/
+results/
+output/
+predictions/
+notemp*/
+test_*/
+tmp/
+*.png
+*.jpg
+*.jpeg
+
+# 忽略特定文件
+pdb_generation.log
+test_run.log
+sequence_length_analysis.png
