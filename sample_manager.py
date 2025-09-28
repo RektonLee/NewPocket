@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set
 import pandas as pd
 from dataclasses import dataclass, asdict
+import fcntl
+import time
 
 
 @dataclass
@@ -175,7 +177,7 @@ class SampleManager:
     
     def get_protein_path(self, sample_id: str, force_unique: bool = False) -> Tuple[Path, bool]:
         """
-        获取蛋白质PDB路径
+        获取蛋白质PDB路径（线程安全版本）
         返回: (路径, 是否为共享文件)
         """
         if sample_id not in self.sample_registry:
@@ -184,22 +186,54 @@ class SampleManager:
         sample_info = self.sample_registry[sample_id]
         protein_hash = sample_info.protein_hash
         
-        # 检查是否可以使用共享文件
-        if self.enable_deduplication and not force_unique and protein_hash in self.protein_index:
-            shared_path = Path(self.protein_index[protein_hash])
-            if shared_path.exists():
-                return shared_path, True
+        # 使用文件锁确保并发安全
+        lock_file = self.metadata_dir / f"protein_{protein_hash}.lock"
         
-        # 使用样本专用路径
-        sample_dir = self.get_sample_dir(sample_id)
-        unique_path = sample_dir / f"{sample_id}_protein.pdb"
-        
-        # 如果启用去重，也记录到共享索引
-        if self.enable_deduplication:
-            self.protein_index[protein_hash] = str(unique_path)
-            self.save_metadata()
-        
-        return unique_path, False
+        try:
+            with open(lock_file, 'w') as lock_fd:
+                # 获取独占锁
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+                
+                # 重新加载最新的索引（其他进程可能已更新）
+                self.protein_index = self._load_index(self.protein_index_file)
+                
+                # 检查是否可以使用共享文件
+                if self.enable_deduplication and not force_unique and protein_hash in self.protein_index:
+                    shared_path = Path(self.protein_index[protein_hash])
+                    if shared_path.exists():
+                        # 创建共享链接文件
+                        sample_dir = self.get_sample_dir(sample_id)
+                        link_file = sample_dir / f"{sample_id}_protein.txt"
+                        with open(link_file, 'w') as f:
+                            f.write(str(shared_path))
+                        logging.info(f"使用共享PDB: {sample_id} -> {shared_path}")
+                        return shared_path, True
+                
+                # 使用样本专用路径
+                sample_dir = self.get_sample_dir(sample_id)
+                unique_path = sample_dir / f"{sample_id}_protein.pdb"
+                
+                # 如果启用去重，记录到共享索引
+                if self.enable_deduplication:
+                    self.protein_index[protein_hash] = str(unique_path)
+                    self.save_metadata()
+                    logging.info(f"创建新PDB: {sample_id} -> {unique_path}")
+                
+                return unique_path, False
+                
+        except Exception as e:
+            logging.error(f"获取蛋白质路径时出错: {e}")
+            # 降级到非锁定模式
+            sample_dir = self.get_sample_dir(sample_id)
+            unique_path = sample_dir / f"{sample_id}_protein.pdb"
+            return unique_path, False
+        finally:
+            # 清理锁文件
+            try:
+                if lock_file.exists():
+                    lock_file.unlink()
+            except:
+                pass
     
     def get_ligand_path(self, sample_id: str, format: str = "sdf") -> Path:
         """获取配体结构路径"""

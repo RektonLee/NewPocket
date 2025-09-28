@@ -172,26 +172,56 @@ def predict_kinetics_range(input_data, model_path, output_dir='predictions',
                 
                 if protein_path.exists() and protein_path.stat().st_size > 0:
                     pdb_path = str(protein_path)
-                    logging.info(f"Using existing PDB file: {pdb_path}")
+                    if is_shared:
+                        logging.info(f"Using shared PDB file: {pdb_path}")
+                    else:
+                        logging.info(f"Using existing PDB file: {pdb_path}")
                 else:
-                    logging.warning(f"Skip sample {sample_id}: PDB file not found ({protein_path})")
-                    if use_sample_manager and sample_manager:
-                        sample_manager.log_failure(sample_id, "missing_pdb", f"PDB file not found: {protein_path}", len(seq))
-                    
-                    results.append({
-                        'sample_id': sample_id,
-                        'sequence': seq,
-                        'smiles': smiles,
-                        'kcat_pred': None,
-                        'km_pred': None,
-                        'km_pred_log10': None,
-                        'experimental_km_log10': experimental_km_log10,
-                        'km_error_log10': None,
-                        'km_error_relative': None,
-                        'temperature': temperature,
-                        'error': f'PDB file not found: {protein_path}'
-                    })
-                    continue
+                    # 检查是否是符号链接
+                    if protein_path.is_symlink():
+                        # 解析符号链接
+                        real_path = protein_path.resolve()
+                        if real_path.exists() and real_path.stat().st_size > 0:
+                            pdb_path = str(real_path)
+                            logging.info(f"Using shared PDB file via symlink: {pdb_path}")
+                        else:
+                            logging.warning(f"Skip sample {sample_id}: Shared PDB file not found ({real_path})")
+                            if use_sample_manager and sample_manager:
+                                sample_manager.log_failure(sample_id, "missing_shared_pdb", f"Shared PDB file not found: {real_path}", len(seq))
+                            
+                            results.append({
+                                'sample_id': sample_id,
+                                'sequence': seq,
+                                'smiles': smiles,
+                                'kcat_pred': None,
+                                'km_pred': None,
+                                'km_pred_log10': None,
+                                'experimental_km_log10': experimental_km_log10,
+                                'km_error_log10': None,
+                                'km_error_relative': None,
+                                'temperature': temperature,
+                                'error': f'Shared PDB file not found: {real_path}'
+                            })
+                            continue
+                    else:
+                        logging.warning(f"Skip sample {sample_id}: PDB file not found ({protein_path})")
+                        if use_sample_manager and sample_manager:
+                            sample_manager.log_failure(sample_id, "missing_pdb", f"PDB file not found: {protein_path}", len(seq))
+                        
+                        results.append({
+                            'sample_id': sample_id,
+                            'sequence': seq,
+                            'smiles': smiles,
+                            'kcat_pred': None,
+                            'km_pred': None,
+                            'km_pred_log10': None,
+                            'experimental_km_log10': experimental_km_log10,
+                            'km_error_log10': None,
+                            'km_error_relative': None,
+                            'temperature': temperature,
+                            'error': f'PDB file not found: {protein_path}'
+                        })
+                        continue
             else:
                 pdb_content = structure_processor.predict_structure(seq, uniprot_id)
                 temp_pdb_dir = os.path.join(output_dir, 'temp_pdbs')

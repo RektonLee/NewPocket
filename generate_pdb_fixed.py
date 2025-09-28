@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Robust PDB generation script using ESMFold with multi-GPU, batching, length control & fallbacks.
 
 Features added:
@@ -25,12 +26,12 @@ import torch
 from transformers import AutoTokenizer, EsmForProteinFolding
 from transformers.models.esm.openfold_utils.protein import to_pdb, Protein as OFProtein
 from transformers.models.esm.openfold_utils.feats import atom14_to_atom37
-from sample_manager import SampleManager  # 新增导入
+from sample_manager import SampleManager  # New import
 
 # ---------------------------------
 # Logging setup
 # ---------------------------------
-def setup_logger(log_path: str = 'pdb_generation.log'):
+def setup_logger(log_path='pdb_generation.log'):
     os.makedirs(os.path.dirname(log_path) or '.', exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -423,6 +424,7 @@ def main():
     parser.add_argument('--gradient-checkpointing', action='store_true', help='Enable gradient checkpointing (saves memory)')
     parser.add_argument('--cpu-offload', action='store_true', help='Offload model to CPU between predictions')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing PDB files')
+    parser.add_argument('--skip-registration', action='store_true', help='Skip sample registration (assume already registered)')
     parser.add_argument('--report-json', type=str, default='pdb_report.json', help='Save summary JSON')
     args = parser.parse_args()
 
@@ -431,10 +433,23 @@ def main():
     # 设置输出目录和样本管理
     if args.use_sample_manager:
         sample_manager = SampleManager(args.sample_data_dir)
-        # 从CSV注册样本
-        sample_manager.register_samples_from_csv(args.input)
+        
+        # 根据skip_registration参数决定是否注册样本
+        if not args.skip_registration:
+            # 从CSV注册样本
+            sample_manager.register_samples_from_csv(args.input)
+            logging.info(f"Registered samples from {args.input}")
+        else:
+            # 检查是否已经注册，如果没有则重新注册
+            if len(sample_manager.sample_registry) == 0:
+                logging.info(f"Sample registry is empty, registering samples from {args.input}")
+                sample_manager.register_samples_from_csv(args.input)
+            else:
+                logging.info(f"Skipping sample registration (assume already registered)")
+            
         output_dir = sample_manager.base_dir
         logging.info(f"Using SampleManager with base dir: {output_dir}")
+        logging.info(f"Total registered samples: {len(sample_manager.sample_registry)}")
     else:
         sample_manager = None
         output_dir = args.output_dir
@@ -469,16 +484,91 @@ def main():
     # 单序列多GPU并行处理逻辑
     logging.info(f"Processing {len(sequences)} sequences using {len(predictor.device_ids)} GPUs in parallel")
     
-    # 预处理所有序列
+    # 全局序列去重机制
+    import hashlib
+    import json
+    from pathlib import Path
+    
+    # 序列去重数据库文件
+    SEQUENCE_DB_FILE = os.path.join(output_dir, "sequence_database.json")
+    sequence_database = {}
+    
+    # 加载现有的序列数据库
+    if os.path.exists(SEQUENCE_DB_FILE):
+        try:
+            with open(SEQUENCE_DB_FILE, 'r') as f:
+                sequence_database = json.load(f)
+            logging.info(f"加载了 {len(sequence_database)} 个已处理的序列")
+        except Exception as e:
+            logging.warning(f"无法加载序列数据库: {e}")
+            sequence_database = {}
+    
+    # 预处理所有序列 - 实现真正的序列级别去重
     processed_sequences = []
+    
     for idx, (raw_seq, sample_id) in enumerate(zip(sequences, sample_ids)):
         proc_seq, meta = handle_sequence(raw_seq, args.max_length, args.truncate_mode)
+        
+        # 计算序列hash
+        seq_hash = hashlib.md5(proc_seq.encode()).hexdigest()
+        
+        # 检查序列是否已经处理过
+        if seq_hash in sequence_database:
+            # 序列已存在，使用共享PDB
+            shared_info = sequence_database[seq_hash]
+            shared_pdb_path = Path(shared_info['pdb_path'])
+            
+            # 检查共享PDB文件是否仍然存在
+            if shared_pdb_path.exists():
+                # 使用索引机制，不复制文件，只记录共享信息
+                if args.use_sample_manager:
+                    # 为SampleManager创建符号链接或记录共享信息
+                    current_pdb_path, _ = sample_manager.get_protein_path(sample_id)
+                    if not current_pdb_path.exists() or args.overwrite:
+                        # 创建符号链接指向共享PDB
+                        current_pdb_path.parent.mkdir(parents=True, exist_ok=True)
+                        if current_pdb_path.exists():
+                            current_pdb_path.unlink()  # 删除现有文件
+                        current_pdb_path.symlink_to(shared_pdb_path)
+                        logging.info(f"[{idx+1}/{len(sequences)}] 创建共享PDB链接: {sample_id} -> {shared_info['original_sample_id']}")
+                        
+                        # 更新SampleManager记录共享信息
+                        sample_manager.update_sample_status(sample_id, "shared", 
+                                                          pdb_path=str(current_pdb_path),
+                                                          shared_from=shared_info['original_sample_id'],
+                                                          shared_pdb_path=str(shared_pdb_path))
+                    else:
+                        logging.info(f"[{idx+1}/{len(sequences)}] 跳过 {sample_id} (PDB已存在)")
+                else:
+                    # 非SampleManager模式，创建符号链接
+                    pdb_filename = f"seq_{idx+1}.pdb"
+                    pdb_path = os.path.join(output_dir, pdb_filename)
+                    if not os.path.exists(pdb_path) or args.overwrite:
+                        if os.path.exists(pdb_path):
+                            os.remove(pdb_path)
+                        os.symlink(shared_pdb_path, pdb_path)
+                        logging.info(f"[{idx+1}/{len(sequences)}] 创建共享PDB链接: {sample_id} -> {shared_info['original_sample_id']}")
+                
+                meta['status'] = 'cached_shared'
+                meta['is_shared'] = True
+                meta['shared_from'] = shared_info['original_sample_id']
+                meta['shared_pdb_path'] = str(shared_pdb_path)
+                meta['pdb_path'] = str(current_pdb_path if args.use_sample_manager else pdb_path)
+                report.append(meta)
+                continue
+            else:
+                # 共享PDB文件不存在，从数据库中移除
+                logging.warning(f"共享PDB文件不存在: {shared_pdb_path}，从数据库中移除")
+                del sequence_database[seq_hash]
         
         # 检查是否需要跳过
         if args.use_sample_manager:
             pdb_path, is_shared = sample_manager.get_protein_path(sample_id)
             if pdb_path.exists() and not args.overwrite:
-                logging.info(f"[{idx+1}/{len(sequences)}] Skip existing {sample_id}")
+                if is_shared:
+                    logging.info(f"[{idx+1}/{len(sequences)}] Skip {sample_id} (using shared PDB)")
+                else:
+                    logging.info(f"[{idx+1}/{len(sequences)}] Skip existing {sample_id}")
                 meta['status'] = 'cached'
                 meta['is_shared'] = is_shared
                 report.append(meta)
@@ -527,6 +617,16 @@ def main():
                         with open(pdb_path, 'w') as f:
                             f.write(pdb_content)
                         logging.info(f"Successfully saved PDB to {pdb_path}")
+                        
+                        # 将新序列添加到序列数据库
+                        seq_hash = hashlib.md5(proc_seq.encode()).hexdigest()
+                        sequence_database[seq_hash] = {
+                            'original_sample_id': sample_id,
+                            'pdb_path': str(pdb_path),
+                            'sequence_length': len(proc_seq),
+                            'created_time': time.strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        logging.info(f"添加新序列到数据库: {sample_id} (hash: {seq_hash[:12]})")
                         
                         if args.use_sample_manager:
                             sample_manager.update_sample_status(sample_id, "completed", pdb_path=str(pdb_path))
@@ -579,6 +679,7 @@ def main():
         "total_sequences": len(sequences),
         "processed": len([r for r in report if r.get('status') == 'ok']),
         "cached": len([r for r in report if r.get('status') == 'cached']),
+        "cached_shared": len([r for r in report if r.get('status') == 'cached_shared']),
         "skipped_too_long": len([r for r in report if r.get('status') == 'skipped_too_long']),
         "failed": len([r for r in report if r.get('status') == 'failed']),
         "total_time_seconds": total_time,
@@ -589,6 +690,7 @@ def main():
     logging.info(f"Total sequences: {stats['total_sequences']}")
     logging.info(f"Successfully processed: {stats['processed']}")
     logging.info(f"Cached (skipped): {stats['cached']}")
+    logging.info(f"Cached (shared): {stats['cached_shared']}")
     logging.info(f"Skipped (too long): {stats['skipped_too_long']}")
     logging.info(f"Failed: {stats['failed']}")
     logging.info(f"Total time: {total_time:.2f}s")
@@ -602,6 +704,14 @@ def main():
             "report": report
         }, f, indent=2)
     logging.info(f"Report saved to {report_path}")
+    
+    # 保存序列数据库
+    try:
+        with open(SEQUENCE_DB_FILE, 'w') as f:
+            json.dump(sequence_database, f, indent=2)
+        logging.info(f"序列数据库已保存: {SEQUENCE_DB_FILE} ({len(sequence_database)} 个序列)")
+    except Exception as e:
+        logging.error(f"保存序列数据库失败: {e}")
     
     # 如果使用SampleManager，生成额外报告
     if args.use_sample_manager:

@@ -7,6 +7,8 @@
 
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # 使用非交互式后端
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
@@ -245,21 +247,21 @@ def plot_predictions(y_true, y_pred, title="Prediction Performance Evaluation"):
     plt.subplots_adjust(top=0.92, hspace=0.3, wspace=0.3)
     
     # Save with high quality
-    plt.savefig('/home/lizihao/Work/enzyme_prediction/PGNN/results/kcat_notemp.png', 
+    plt.savefig('/home/lizihao/Work/enzyme_prediction/PGNN/results/km_prediction_evaluation.png', 
                 dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
     plt.show()
 
 def main():
     # 读取数据
-    print("读取kcat预测结果...")
-    df = pd.read_csv('/home/lizihao/Work/enzyme_prediction/PGNN/notemp_kcat/successful_predictions.csv')
+    print("读取Km预测结果...")
+    df = pd.read_csv('/home/lizihao/Work/enzyme_prediction/PGNN/km_test_data_with_values.csv')
     
     print(f"数据形状: {df.shape}")
     print(f"列名: {df.columns.tolist()}")
     
     # 提取实验值和预测值
-    y_true = df['experimental value[log10]'].values
-    y_pred = df['predicted value[log10]'].values
+    y_true = df['experimental_km_log10'].values
+    y_pred = df['predicted_km_log10'].values
     
     print(f"\n实验值范围: {np.nanmin(y_true):.3f} 到 {np.nanmax(y_true):.3f}")
     print(f"预测值范围: {np.nanmin(y_pred):.3f} 到 {np.nanmax(y_pred):.3f}")
@@ -270,7 +272,7 @@ def main():
     
     # 打印结果
     print("\n" + "="*60)
-    print("kcat预测效果评估结果")
+    print("Km预测效果评估结果")
     print("="*60)
     
     for key, value in metrics.items():
@@ -286,14 +288,14 @@ def main():
     
     # 保存结果到CSV
     metrics_df = pd.DataFrame([metrics])
-    metrics_df.to_csv('/home/lizihao/Work/enzyme_prediction/PGNN/results/kcat_notemp.csv', 
+    metrics_df.to_csv('/home/lizihao/Work/enzyme_prediction/PGNN/results/km_evaluation_metrics.csv', 
                       index=False)
-    print(f"\n评估指标已保存到: kcat_evaluation_metrics.csv")
+    print(f"\n评估指标已保存到: km_evaluation_metrics.csv")
     
     # Generate plots
     print("\nGenerating prediction performance charts...")
-    plot_predictions(y_true, y_pred, "kcat Prediction Performance Evaluation")
-    print("Charts saved to: kcat_prediction_evaluation.png")
+    plot_predictions(y_true, y_pred, "Km Prediction Performance Evaluation")
+    print("Charts saved to: km_prediction_evaluation.png")
     
     # 按误差范围分析
     print("\n" + "="*60)

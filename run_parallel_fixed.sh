@@ -1,13 +1,15 @@
 #!/bin/bash
 
 # Fixed parallel prediction script
-# Usage: ./run_parallel_fixed.sh [num_chunks]
+# Usage: ./run_parallel_fixed.sh [num_chunks] [pdb_base_dir]
+# Example: ./run_parallel_fixed.sh 4 parallel_pdb_output_20250926_105227
 
 # Default parameters
 NUM_CHUNKS=${1:-8}       # Default 8 chunks
-INPUT_FILE="kcat_test_results.csv"
+INPUT_FILE="kcat_data_successful_pdb2.csv"
 MODEL_PATH="/home/lizihao/Work/enzyme_prediction/src/simple2/outputs/nopqr_attention_rbf/best_model.pt"
-BASE_OUTPUT_DIR="results/parallel_$(date +%Y%m%d_%H%M%S)"
+BASE_OUTPUT_DIR="results/parallel_kcatafter$(date +%Y%m%d_%H%M%S)"
+PDB_BASE_DIR=${2:-"kcat_full_after"}  # PDB文件的基础目录
 
 echo "=========================================="
 echo "Parallel prediction task started"
@@ -67,7 +69,7 @@ for i in $(seq 1 $NUM_CHUNKS); do
         --start $START_IDX \
         --end $END_IDX \
         --use-sample-manager \
-        --sample-data-dir "sample_data" \
+        --sample-data-dir "$PDB_BASE_DIR" \
         --temperature 303.15 \
         > "$BASE_OUTPUT_DIR/chunk_${i}.log" 2>&1 &
     
