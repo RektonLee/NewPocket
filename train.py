@@ -25,7 +25,7 @@ def compute_metrics(y_true_log, y_pred_log):
     }
 
 def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=500):
-    dataset = torch.load(dataset_path)
+    dataset = torch.load(dataset_path, weights_only=False)
     
     # 检查数据集是否包含 NaN
     for data in dataset:
@@ -37,7 +37,7 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     writer = SummaryWriter(save_dir)
 
     # === Load dataset ===
-    data_list = torch.load(dataset_path)  # List[Data]
+    data_list = torch.load(dataset_path, weights_only=False)  # List[Data]
     print(data_list[0])  # 打印第一个图数据
     actual_num_atom_types = data_list[0].x.shape[1]
     np.random.shuffle(data_list)
@@ -47,9 +47,15 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
 
     print(data_list[0].temperature)
     # === Initialize model ===
-    node_input_dim = data_list[0].x.shape[1] #default 10
-    edge_input_dim = data_list[0].edge_attr.shape[1]
-    model = MD.PocketGNNWithAttention(node_input_dim=node_input_dim, edge_input_dim=edge_input_dim).to(device)
+    node_input_dim = data_list[0].x.shape[1] #default 52
+    edge_input_dim = data_list[0].edge_attr.shape[1]  # 现在应该是24维
+    print(f"Node input dim: {node_input_dim}, Edge input dim: {edge_input_dim}")
+    
+    # 使用新的kcat专用模型
+    model = MD.PocketGNNKcatOnly(node_input_dim=node_input_dim, edge_input_dim=edge_input_dim,      hidden_dim=128,  # 减小隐藏层
+        num_layers=3,     # 减少层数
+        heads=4,          # 减少注意力头
+        dropout=0.1).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
     best_val_loss = float('inf')
@@ -72,10 +78,10 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
             batch = batch.to(device)
             optimizer.zero_grad()
             
-            # 重新组织标签 - 将相邻的kcat和Km配对
+            # 只使用kcat标签（第一列）
             actual_batch_size = batch.num_graphs  # 使用实际的 batch size
-            y_reshaped = batch.y.reshape(actual_batch_size, 2)  # 每两个值组成一对[kcat, Km]
-            log_y = y_reshaped
+            y_reshaped = batch.y.reshape(actual_batch_size, 2)  # [kcat, km]
+            log_y = y_reshaped[:, 0:1]  # 只取kcat列 [batch_size, 1]
             
             if torch.isnan(batch.x).any():
                 print("❌ batch.x 中含有 NaN")
@@ -103,10 +109,10 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
             for batch in val_loader:
                 batch = batch.to(device)
                 
-                # 重新组织标签
+                # 只使用kcat标签（第一列）
                 actual_batch_size = batch.num_graphs  # 使用实际的 batch size
-                y_reshaped = batch.y.reshape(actual_batch_size, 2)  # 每两个值组成一对[kcat, Km]
-                log_y = y_reshaped
+                y_reshaped = batch.y.reshape(actual_batch_size, 2)  # [kcat, km]
+                log_y = y_reshaped[:, 0:1]  # 只取kcat列 [batch_size, 1]
                 
                 try:
                     out = model(batch)
@@ -177,57 +183,51 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
         for batch in val_loader:
             batch = batch.to(device)
             batch_size = batch.num_graphs
-
-            log_y = batch.y.view(batch_size, -1)
+            
+            # 只使用kcat标签（第一列），与训练时保持一致
+            y_reshaped = batch.y.reshape(batch_size, 2)
+            log_y = y_reshaped[:, 0:1]  # 只取kcat列
+            
             try:
                 out = model(batch)
             except ValueError as e:
                 print(f"❌ NaN 输出，batch中数据文件: {[d.pdb_id for d in batch]}")
                 raise e
-            all_y_true.append(log_y.cpu())  # 转回原始值
-            all_y_pred.append(out.cpu())    # 转回原始值
+            all_y_true.append(log_y.cpu())
+            all_y_pred.append(out.cpu())
     
     all_y_true = torch.cat(all_y_true, dim=0).numpy()
     all_y_pred = torch.cat(all_y_pred, dim=0).numpy()
     
-    # 分别绘制kcat和Km的散点图
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+    # 绘制kcat散点图（只有一个图）
+    plt.figure(figsize=(8, 6))
     
     # kcat散点图
-    ax1.scatter(all_y_true[:, 0], all_y_pred[:, 0], alpha=0.6)
-    ax1.plot([all_y_true[:, 0].min(), all_y_true[:, 0].max()], 
-             [all_y_true[:, 0].min(), all_y_true[:, 0].max()], 'r--')
-    ax1.set_xlabel('True kcat')
-    ax1.set_ylabel('Predicted kcat')
-    r2_kcat = r2_score(all_y_true[:, 0], all_y_pred[:, 0])
-    ax1.set_title(f'kcat: True vs Predicted (R² = {r2_kcat:.3f})')
-    
-    # Km散点图
-    ax2.scatter(all_y_true[:, 1], all_y_pred[:, 1], alpha=0.6)
-    ax2.plot([all_y_true[:, 1].min(), all_y_true[:, 1].max()], 
-             [all_y_true[:, 1].min(), all_y_true[:, 1].max()], 'r--')
-    ax2.set_xlabel('True Km')
-    ax2.set_ylabel('Predicted Km')
-    r2_km = r2_score(all_y_true[:, 1], all_y_pred[:, 1])
-    ax2.set_title(f'Km: True vs Predicted (R² = {r2_km:.3f})')
+    plt.scatter(all_y_true.flatten(), all_y_pred.flatten(), alpha=0.6)
+    plt.plot([all_y_true.min(), all_y_true.max()], 
+             [all_y_true.min(), all_y_true.max()], 'r--')
+    plt.xlabel('True kcat (log10)')
+    plt.ylabel('Predicted kcat (log10)')
+    r2_kcat = r2_score(all_y_true.flatten(), all_y_pred.flatten())
+    plt.title(f'kcat: True vs Predicted (R² = {r2_kcat:.3f})')
+    plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'prediction_scatter.png'))
+    plt.savefig(os.path.join(save_dir, 'kcat_prediction_scatter.png'))
     plt.close()
     
-    # 4. 热力图
-    for i, param_name in enumerate(['kcat', 'Km']):
-        plt.figure(figsize=(8, 7))
-        true_vals = all_y_true[:, i]
-        pred_vals = all_y_pred[:, i]
-        sns.kdeplot(x=true_vals, y=pred_vals, cmap="viridis", fill=True, thresh=0.05)
-        plt.plot([true_vals.min(), true_vals.max()], 
-                 [true_vals.min(), true_vals.max()], 'r--')
-        plt.xlabel(f'True {param_name}')
-        plt.ylabel(f'Predicted {param_name}')
-        plt.title(f'{param_name}: Density Plot')
-        plt.savefig(os.path.join(save_dir, f'{param_name}_density.png'))
-        plt.close()
+    # 4. kcat密度图
+    plt.figure(figsize=(8, 7))
+    true_vals = all_y_true.flatten()
+    pred_vals = all_y_pred.flatten()
+    sns.kdeplot(x=true_vals, y=pred_vals, cmap="viridis", fill=True, thresh=0.05)
+    plt.plot([true_vals.min(), true_vals.max()], 
+             [true_vals.min(), true_vals.max()], 'r--')
+    plt.xlabel('True kcat (log10)')
+    plt.ylabel('Predicted kcat (log10)')
+    plt.title('kcat: Density Plot')
+    plt.savefig(os.path.join(save_dir, 'kcat_density.png'))
+    plt.close()
     
     # 保存最终指标到文件
     metrics_df = pd.DataFrame({
@@ -244,8 +244,8 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default="/home/lizihao/Work/enzyme_prediction/src/simple2/data/processed/dataset_NAN_nopqr_rbf.pt", help='Path to .pt dataset')
-    parser.add_argument('--save_dir', type=str, default='outputs/nopqr_attention_rbf_residual')
+    parser.add_argument('--dataset', type=str, default="kcat_dataset_enhanced1.pt", help='Path to .pt dataset')
+    parser.add_argument('--save_dir', type=str, default='outputs/kcat_enhanced_model')
     args = parser.parse_args()
     from utils.metadata_utils import save_metadata
 
@@ -253,9 +253,9 @@ if __name__ == '__main__':
     save_metadata(
         save_dir=args.save_dir,
         dataset_path=args.dataset,
-        graph_builder_version='builder_rbf',
-        gnn_model_version='PocketGNNwithAttention',
-        comments='Temp + Attention + rbf+residual connection'
+        graph_builder_version='enhanced_builder',
+        gnn_model_version='PocketGNNKcatOnly',
+        comments='Enhanced features + kcat-only prediction + angle features'
     )
 
     train(args.dataset, args.save_dir)

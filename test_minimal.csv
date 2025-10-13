@@ -1,5 +1,0 @@
-sample_id,sequence,smiles
-test_minimal0,ACDEFGHIKLMNPQRSTVWY,CC(=O)O
-test_minimal1,ACDEFGHIKLMNPQRSTVWY,CCC(=O)O
-test_minimal2,ACDEFGHIKLMNPQRSTVWY,CC(=O)OO
-test_minimal3,ACDEFGHIKLMNPQRSTVWY,CC(=O)OO

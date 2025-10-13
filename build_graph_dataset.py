@@ -201,13 +201,14 @@ def enhanced_build_graph(atoms, temperature):
     return data
 
 def main():
+    print("开始执行main函数...")
     # 读取你的训练数据
-    df = pd.read_csv('kcat_data_for_training_corrected.csv')
+    df = pd.read_csv('kcat_train_after_model.csv')
     print(f'Loading {len(df)} samples from CSV')
 
     # 设置pocket目录 - 适配新的文件结构
-    POCKET_BASE_DIR = '/home/lizihao/Work/enzyme_prediction/PGNN/sample_data/samples'
-    SAVE_PATH = 'kcat_dataset_enhanced1.pt'  # 使用新文件名
+    POCKET_BASE_DIR = '/home/lizihao/Work/enzyme_prediction/PGNN/kcat_full_after/samples'
+    SAVE_PATH = 'kcat_train_after.pt'  # 使用新文件名
 
     dataset = []
     successful_count = 0
@@ -217,7 +218,9 @@ def main():
         sample_id = row['sample_id']
         smiles = row['substrate_smiles']  # 使用正确的列名
         kcat_value = row['kcat_value']
-        temperature = row['temperature']
+        # temperature = row['temperature'] 临时取消     
+        temperature=303.15
+        # 使用实际的ec值而不是硬编码
         ec = row['ec']
         
         # 计算pocket文件名 - 适配新的文件结构
@@ -238,7 +241,7 @@ def main():
             # 使用增强版图构建函数
             print(f"构建增强图: {sample_id}")
             data = enhanced_build_graph(atoms, temperature)
-            data.y = torch.log10(torch.tensor([kcat_value, 1.0], dtype=torch.float))
+            data.y = torch.log10(torch.tensor([kcat_value], dtype=torch.float))
             data.pdb_id = f'{sample_id}_{pocket_hash}_10A.pdb'
             data.sample_id = sample_id
             data.ec = ec

@@ -422,3 +422,83 @@ class PocketGNNWithAttentionNoTemp(nn.Module):
         graph_x = self.readout(x, batch)
         return graph_x
 
+
+class PocketGNNKcatOnly(nn.Module):
+    """
+    专门用于kcat预测的GNN模型，支持增强的边特征（24维）
+    不包含温度特征，只预测kcat值
+    """
+    def __init__(self, node_input_dim, edge_input_dim, hidden_dim=256, num_layers=6, heads=8, dropout=0.1, concat_heads=True):
+        super().__init__()
+        self.node_encoder = nn.Linear(node_input_dim, hidden_dim)
+
+        self.att_layers = nn.ModuleList()
+        current_dim = hidden_dim
+        for i in range(num_layers):
+            is_last = (i == num_layers - 1)
+            if concat_heads and not is_last:
+                self.att_layers.append(
+                    GATConv(current_dim, hidden_dim // heads, heads=heads, dropout=dropout, concat=True, edge_dim=edge_input_dim if i==0 else None)
+                )
+                current_dim = hidden_dim
+            else:
+                self.att_layers.append(
+                    GATConv(current_dim, hidden_dim, heads=heads, dropout=dropout, concat=False, edge_dim=edge_input_dim if i==0 else None)
+                )
+                current_dim = hidden_dim
+
+        self.readout = global_mean_pool
+
+        # MLP for kcat-only regression
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 1)  # 只输出 kcat
+        )
+
+    def forward(self, data, return_attention_weights=False):
+        x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
+        x = self.node_encoder(x)
+        x = F.relu(x)
+
+        all_attention_weights = []
+        for i, layer in enumerate(self.att_layers):
+            if hasattr(layer, 'edge_dim') and layer.edge_dim is not None and i == 0:
+                x_new, attention_info = layer(x, edge_index, edge_attr=edge_attr, return_attention_weights=True)
+            else:
+                x_new, attention_info = layer(x, edge_index, return_attention_weights=True)
+            x = F.elu(x_new)
+            if return_attention_weights:
+                all_attention_weights.append(attention_info[1])
+
+        graph_x = self.readout(x, batch)  # [batch_size, hidden_dim]
+
+        # 直接进行kcat回归，不融合温度特征
+        out = self.mlp(graph_x)  # [batch_size, 1]
+
+        if torch.isnan(out).any():
+            raise ValueError("模型输出包含 NaN 值")
+
+        if return_attention_weights:
+            return out, all_attention_weights
+        return out
+
+    def get_graph_embedding(self, data):
+        x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
+        x = self.node_encoder(x)
+        x = F.relu(x)
+
+        for i, layer in enumerate(self.att_layers):
+            if hasattr(layer, 'edge_dim') and layer.edge_dim is not None and i == 0:
+                x = layer(x, edge_index, edge_attr=edge_attr)
+            else:
+                x = layer(x, edge_index)
+            x = F.elu(x)
+
+        graph_x = self.readout(x, batch)
+        return graph_x
+
