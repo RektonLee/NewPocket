@@ -35,14 +35,10 @@ def predict(dataset_path, model_path, save_dir="outputs", batch_size=32):
     print(f"Node input dim: {node_input_dim}, Edge input dim: {edge_input_dim}")
     
     # 使用与train.py相同的模型
-    model = MD.PocketGNNKcatOnly(
-        node_input_dim=node_input_dim, 
-        edge_input_dim=edge_input_dim,
-        hidden_dim=128,
-        num_layers=3,
-        heads=4,
-        dropout=0.1
-    ).to(device)
+    model = MD.PocketGNNKcatOnly(node_input_dim=node_input_dim, edge_input_dim=edge_input_dim,      hidden_dim=128,  # 减小隐藏层
+        num_layers=3,     # 减少层数
+        heads=4,          # 减少注意力头
+        dropout=0.1).to(device)
     
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
@@ -243,8 +239,8 @@ def create_plots(df, y_true, y_pred, save_dir):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default="kcat_test.pt", help='Path to .pt dataset')
-    parser.add_argument('--model', type=str, default='outputs/kcat_enhanced_model/best_model.pt', help='Path to model')
-    parser.add_argument('--save_dir', type=str, default='outputs/predictions/test_on_before', help='Output directory')
+    parser.add_argument('--model', type=str, default='outputs/kcat_full/best_model.pt', help='Path to model')
+    parser.add_argument('--save_dir', type=str, default='outputs/predictions/test_on_full', help='Output directory')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     args = parser.parse_args()
     

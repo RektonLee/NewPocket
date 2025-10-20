@@ -288,8 +288,30 @@ def create_fallback_pocket(protein_pdb_path, output_pocket_path):
     return center, size
 
 
+def convert_pdbqt_to_pdb(pdbqt_file, pdb_file):
+    """将PDBQT文件转换为PDB格式"""
+    try:
+        with open(pdbqt_file, 'r') as f_in, open(pdb_file, 'w') as f_out:
+            for line in f_in:
+                if line.startswith(('ATOM', 'HETATM')):
+                    # 移除PDBQT特有的电荷和原子类型信息，保留标准PDB格式
+                    # PDBQT格式: ATOM      1  N   ALA A   1      20.154  16.967  25.462  1.00 11.18           N
+                    # PDB格式:   ATOM      1  N   ALA A   1      20.154  16.967  25.462  1.00 11.18           N
+                    pdb_line = line[:66] + '\n'  # 只保留前66个字符
+                    f_out.write(pdb_line)
+                elif line.startswith(('HEADER', 'TITLE', 'REMARK', 'SEQRES', 'ATOM', 'HETATM', 'TER', 'END')):
+                    # 保留其他标准PDB记录
+                    f_out.write(line)
+        
+        print(f"✅ PDBQT转PDB成功: {pdbqt_file} -> {pdb_file}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ PDBQT转PDB失败: {e}")
+        return False
+
 def extract_pocket_pymol(protein_path, ligand_path, output_path, cutoff=5.0):
-    """使用Bio.PDB提取口袋区域（替代PyMOL）"""
+    """使用Bio.PDB提取口袋区域（包含配体原子）"""
     try:
         from Bio.PDB import PDBParser, PDBIO, Select
         import numpy as np
@@ -334,10 +356,27 @@ def extract_pocket_pymol(protein_path, ligand_path, output_path, cutoff=5.0):
         # 确保输出目录存在
         os.makedirs(os.path.dirname(abs_output_path), exist_ok=True)
         
-        # 保存口袋区域
+        # 保存口袋区域（只包含蛋白质残基）
         io = PDBIO()
         io.set_structure(protein_structure)
         io.save(abs_output_path, PocketSelect())
+        
+        # 手动添加配体原子到口袋文件中
+        print(f"🔍 添加配体原子到口袋文件...")
+        with open(abs_output_path, 'a') as f:
+            # 为配体原子添加HETATM记录
+            atom_count = 0
+            for model in ligand_structure:
+                for chain in model:
+                    for residue in chain:
+                        for atom in residue:
+                            atom_count += 1
+                            coord = atom.get_coord()
+                            # 格式化配体原子为PDB格式
+                            hetatm_line = f"HETATM{atom_count:5d} {atom.get_name():4s} {residue.get_resname():3s} L{residue.get_id()[1]:4d}    {coord[0]:8.3f}{coord[1]:8.3f}{coord[2]:8.3f}  1.00 20.00           {atom.element:2s}\n"
+                            f.write(hetatm_line)
+        
+        print(f"🔍 添加了 {atom_count} 个配体原子")
         
         # 强制刷新文件系统缓存
         import time
@@ -347,7 +386,7 @@ def extract_pocket_pymol(protein_path, ligand_path, output_path, cutoff=5.0):
         if os.path.exists(abs_output_path):
             file_size = os.path.getsize(abs_output_path)
             if file_size > 0:
-                print(f"✅ Bio.PDB extracted pocket saved to {abs_output_path} (size: {file_size} bytes)")
+                print(f"✅ Bio.PDB extracted pocket with ligand saved to {abs_output_path} (size: {file_size} bytes)")
             else:
                 raise ValueError(f"口袋文件为空: {abs_output_path}")
         else:
@@ -445,18 +484,28 @@ def run_preprocess(uniprot_id, smiles, prot_pdb_path, output_pocket_path, index)
         
         # 切换回临时目录获取文件路径
         os.chdir(tmp_dir)
-        receptor_path = os.path.abspath("receptor.pdbqt")
+        
+        # 将PDBQT转换为PDB格式，因为Bio.PDB无法解析PDBQT
+        receptor_pdbqt_path = os.path.abspath("receptor.pdbqt")
+        receptor_pdb_path = os.path.abspath("receptor.pdb")
         pose_path = os.path.abspath("pose0.pdb")
-        print(f"🔍 受体路径: {receptor_path}")
+        
+        print(f"🔍 受体PDBQT路径: {receptor_pdbqt_path}")
+        print(f"🔍 受体PDB路径: {receptor_pdb_path}")
         print(f"🔍 配体路径: {pose_path}")
         
         # 检查文件是否存在
-        if not os.path.exists(receptor_path):
-            raise FileNotFoundError(f"受体文件不存在: {receptor_path}")
+        if not os.path.exists(receptor_pdbqt_path):
+            raise FileNotFoundError(f"受体PDBQT文件不存在: {receptor_pdbqt_path}")
         if not os.path.exists(pose_path):
             raise FileNotFoundError(f"配体文件不存在: {pose_path}")
         
-        extract_pocket_pymol(receptor_path, pose_path, out_pocket_path, cutoff=5)
+        # 将PDBQT转换为PDB格式
+        print(f"🔄 将PDBQT转换为PDB格式...")
+        convert_pdbqt_to_pdb(receptor_pdbqt_path, receptor_pdb_path)
+        
+        # 使用PDB格式的文件进行口袋提取
+        extract_pocket_pymol(receptor_pdb_path, pose_path, out_pocket_path, cutoff=5)
         
         # 验证口袋文件是否成功生成
         if os.path.exists(out_pocket_path):

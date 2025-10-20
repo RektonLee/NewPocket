@@ -17,14 +17,39 @@ from graph_builder_rbf import build_graph, parse_pocket, DIST_CUTOFF, RBF_CENTER
 from docking import run_preprocess
 import hashlib
 import argparse
+import time
+import signal
 
 # Get correct dimensions from graph_builder_rbf.py
 NODE_INPUT_DIM = 52
 EDGE_INPUT_DIM = RBF_CENTERS
 
+# 超时机制实现
+class TimeoutError(Exception):
+    pass
+
+def timeout(seconds):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            def signal_handler(signum, frame):
+                raise TimeoutError(f"操作超时 ({seconds}秒)")
+            
+            old_handler = signal.signal(signal.SIGALRM, signal_handler)
+            signal.alarm(seconds)
+            
+            try:
+                result = func(*args, **kwargs)
+                return result
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+        return wrapper
+    return decorator
+
 def predict_kinetics_range(input_data, model_path, output_dir='predictions', 
                           start_idx=0, end_idx=None, temperature=303.15, 
-                          use_sample_manager=True, sample_data_dir='sample_data'):
+                          use_sample_manager=True, sample_data_dir='sample_data', 
+                          docking_timeout=300):
     """
     Predict enzyme kinetics parameters for specified range
     
@@ -37,6 +62,7 @@ def predict_kinetics_range(input_data, model_path, output_dir='predictions',
     temperature: temperature
     use_sample_manager: whether to use SampleManager
     sample_data_dir: SampleManager base directory
+    docking_timeout: docking超时时间（秒），默认300秒（5分钟）
     """
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -249,15 +275,27 @@ def predict_kinetics_range(input_data, model_path, output_dir='predictions',
                 logging.info(f"✅ 使用已存在的pocket文件: {pocket_pdb}")
             else:
                 try:
-                    logging.info(f"🔄 开始docking处理: {sample_id}")
-                    result = run_preprocess(uniprot_id or sample_id, smiles, pdb_path, pocket_pdb, i)
-                    if not result:
-                        raise RuntimeError("Docking preprocessing failed")
+                    logging.info(f"🔄 开始docking处理: {sample_id} (超时限制: {docking_timeout}秒)")
+                    start_time = time.time()
                     
+                    # 使用超时机制运行docking预处理
+                    with timeout(docking_timeout):
+                        result = run_preprocess(uniprot_id or sample_id, smiles, pdb_path, pocket_pdb, i)
+                        if not result:
+                            raise RuntimeError("Docking preprocessing failed")
+                    
+                    # 检查pocket文件是否真的生成了
                     if not os.path.exists(pocket_pdb):
                         raise FileNotFoundError(f"Pocket file not generated: {pocket_pdb}")
                     
-                    logging.info(f"✅ Docking完成，pocket文件: {pocket_pdb}")
+                    elapsed_time = time.time() - start_time
+                    logging.info(f"✅ Docking完成，pocket文件: {pocket_pdb} (耗时: {elapsed_time:.1f}秒)")
+                    
+                except TimeoutError as e:
+                    logging.error(f"⏰ Docking超时: {str(e)}")
+                    if use_sample_manager and sample_manager:
+                        sample_manager.log_failure(sample_id, "docking_timeout", str(e), len(seq))
+                    raise
                 except Exception as e:
                     logging.error(f"❌ Docking失败: {str(e)}")
                     raise
@@ -421,6 +459,7 @@ if __name__ == '__main__':
     parser.add_argument('--temperature', type=float, default=303.15, help='Temperature (K)')
     parser.add_argument('--use-sample-manager', action='store_true', help='Use SampleManager')
     parser.add_argument('--sample-data-dir', type=str, default='sample_data', help='SampleManager base directory')
+    parser.add_argument('--docking-timeout', type=int, default=300, help='Docking超时时间（秒），默认300秒（5分钟）')
     
     args = parser.parse_args()
     
@@ -433,7 +472,8 @@ if __name__ == '__main__':
         end_idx=args.end,
         temperature=args.temperature,
         use_sample_manager=args.use_sample_manager,
-        sample_data_dir=args.sample_data_dir
+        sample_data_dir=args.sample_data_dir,
+        docking_timeout=args.docking_timeout
     )
     
     print(f"Range prediction completed [{args.start}:{args.end}], results saved to: {args.output}")

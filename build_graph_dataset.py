@@ -203,12 +203,12 @@ def enhanced_build_graph(atoms, temperature):
 def main():
     print("开始执行main函数...")
     # 读取你的训练数据
-    df = pd.read_csv('kcat_train_after_model.csv')
+    df = pd.read_csv('kcat_after_model_new.csv')
     print(f'Loading {len(df)} samples from CSV')
 
     # 设置pocket目录 - 适配新的文件结构
     POCKET_BASE_DIR = '/home/lizihao/Work/enzyme_prediction/PGNN/kcat_full_after/samples'
-    SAVE_PATH = 'kcat_train_after.pt'  # 使用新文件名
+    SAVE_PATH = 'kcat_train_after_new.pt'  # 使用新文件名
 
     dataset = []
     successful_count = 0

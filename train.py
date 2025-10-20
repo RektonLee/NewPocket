@@ -13,6 +13,7 @@ matplotlib.use('Agg')  # 确保在没有GUI的环境中使用
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
+from utils.metadata_utils import update_training_results
 
 def compute_metrics(y_true_log, y_pred_log):
     y_true_log = y_true_log.numpy()
@@ -52,10 +53,19 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     print(f"Node input dim: {node_input_dim}, Edge input dim: {edge_input_dim}")
     
     # 使用新的kcat专用模型
-    model = MD.PocketGNNKcatOnly(node_input_dim=node_input_dim, edge_input_dim=edge_input_dim,      hidden_dim=128,  # 减小隐藏层
-        num_layers=3,     # 减少层数
-        heads=4,          # 减少注意力头
-        dropout=0.1).to(device)
+    hidden_dim = 128  # 模型隐藏维度
+    num_layers = 3    # 层数
+    heads = 4         # 注意力头数
+    dropout = 0.1     # Dropout 概率
+
+    model = MD.PocketGNNKcatOnly(
+        node_input_dim=node_input_dim,
+        edge_input_dim=edge_input_dim,
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        heads=heads,
+        dropout=dropout
+    ).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
     best_val_loss = float('inf')
@@ -66,6 +76,25 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     r2_history = []
     pearson_history = []
     
+    # 将本次训练的关键超参数与环境信息记录到共享表中（保持运行中状态）
+    try:
+        update_training_results(
+            save_dir=save_dir,
+            status="running",
+            model_hidden_dim=hidden_dim,
+            model_num_layers=num_layers,
+            model_heads=heads,
+            model_dropout=dropout,
+            lr=lr,
+            batch_size=batch_size,
+            max_epochs=max_epochs,
+            node_input_dim=node_input_dim,
+            edge_input_dim=edge_input_dim,
+            device=str(device)
+        )
+    except Exception as _:
+        pass
+
     for epoch in range(1, max_epochs + 1):
         model.train()
         train_losses = []
@@ -209,6 +238,7 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     plt.xlabel('True kcat (log10)')
     plt.ylabel('Predicted kcat (log10)')
     r2_kcat = r2_score(all_y_true.flatten(), all_y_pred.flatten())
+    pearson_end = pearsonr(all_y_true.flatten(), all_y_pred.flatten())[0]
     plt.title(f'kcat: True vs Predicted (R² = {r2_kcat:.3f})')
     plt.grid(True, alpha=0.3)
     
@@ -239,13 +269,25 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     })
     metrics_df.to_csv(os.path.join(save_dir, 'training_metrics.csv'), index=False)
     
+    # 记录最终结果到共享表
+    try:
+        update_training_results(
+            save_dir=save_dir,
+            status="completed",
+            best_val_loss=best_val_loss,
+            final_r2=r2_kcat,
+            final_pearson=pearson_end
+        )
+    except Exception as _:
+        pass
+
     print("✅ Training finished. Best model and plots saved to", save_dir)
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default="kcat_dataset_enhanced1.pt", help='Path to .pt dataset')
-    parser.add_argument('--save_dir', type=str, default='outputs/kcat_enhanced_model')
+    parser.add_argument('--dataset', type=str, default="kcat_full.pt", help='Path to .pt dataset')
+    parser.add_argument('--save_dir', type=str, default='outputs/kcat_full')
     args = parser.parse_args()
     from utils.metadata_utils import save_metadata
 
@@ -255,7 +297,7 @@ if __name__ == '__main__':
         dataset_path=args.dataset,
         graph_builder_version='enhanced_builder',
         gnn_model_version='PocketGNNKcatOnly',
-        comments='Enhanced features + kcat-only prediction + angle features'
+        comments='Enhanced features + kcat-only prediction + angle features,9124 items ,simplist model'
     )
 
     train(args.dataset, args.save_dir)

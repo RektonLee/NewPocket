@@ -34,3 +34,5 @@ tmp/
 pdb_generation.log
 test_run.log
 sequence_length_analysis.png
+!utils/*
+!utils/  
