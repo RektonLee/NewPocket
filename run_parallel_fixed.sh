@@ -8,7 +8,7 @@
 NUM_CHUNKS=${1:-2}       # Default 8 chunks
 INPUT_FILE="kcat_data_successful_pdb1.csv"
 MODEL_PATH="/home/lizihao/Work/enzyme_prediction/src/simple2/outputs/nopqr_attention_rbf/best_model.pt"
-BASE_OUTPUT_DIR="results/parallel_kcatbefore$(date +%Y%m%d_%H%M%S)"
+BASE_OUTPUT_DIR="results/parallel_kcatbefore_$(date +%Y%m%d_%H%M%S)"
 PDB_BASE_DIR=${2:-"sample_data"}  # PDB文件的基础目录
 
 echo "=========================================="

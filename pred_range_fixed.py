@@ -28,23 +28,26 @@ EDGE_INPUT_DIM = RBF_CENTERS
 class TimeoutError(Exception):
     pass
 
+class TimeoutContext:
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self.old_handler = None
+    
+    def __enter__(self):
+        def signal_handler(signum, frame):
+            raise TimeoutError(f"操作超时 ({self.seconds}秒)")
+        
+        self.old_handler = signal.signal(signal.SIGALRM, signal_handler)
+        signal.alarm(self.seconds)
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, self.old_handler)
+        return False
+
 def timeout(seconds):
-    def decorator(func):
-        def wrapper(*args, **kwargs):
-            def signal_handler(signum, frame):
-                raise TimeoutError(f"操作超时 ({seconds}秒)")
-            
-            old_handler = signal.signal(signal.SIGALRM, signal_handler)
-            signal.alarm(seconds)
-            
-            try:
-                result = func(*args, **kwargs)
-                return result
-            finally:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
-        return wrapper
-    return decorator
+    return TimeoutContext(seconds)
 
 def predict_kinetics_range(input_data, model_path, output_dir='predictions', 
                           start_idx=0, end_idx=None, temperature=303.15, 
@@ -194,60 +197,51 @@ def predict_kinetics_range(input_data, model_path, output_dir='predictions',
             
             # 1. Get protein structure
             if use_sample_manager and sample_manager:
-                protein_path, is_shared = sample_manager.get_protein_path(sample_id)
+                # 直接检查PDB文件是否存在
+                sample_dir = os.path.join(sample_data_dir, "samples", sample_id)
+                pdb_file = os.path.join(sample_dir, f"{sample_id}_protein.pdb")
+                txt_file = os.path.join(sample_dir, f"{sample_id}_protein.txt")
                 
-                if protein_path.exists() and protein_path.stat().st_size > 0:
-                    pdb_path = str(protein_path)
-                    if is_shared:
-                        logging.info(f"Using shared PDB file: {pdb_path}")
-                    else:
-                        logging.info(f"Using existing PDB file: {pdb_path}")
-                else:
-                    # 检查是否是符号链接
-                    if protein_path.is_symlink():
-                        # 解析符号链接
-                        real_path = protein_path.resolve()
-                        if real_path.exists() and real_path.stat().st_size > 0:
-                            pdb_path = str(real_path)
-                            logging.info(f"Using shared PDB file via symlink: {pdb_path}")
-                        else:
-                            logging.warning(f"Skip sample {sample_id}: Shared PDB file not found ({real_path})")
-                            if use_sample_manager and sample_manager:
-                                sample_manager.log_failure(sample_id, "missing_shared_pdb", f"Shared PDB file not found: {real_path}", len(seq))
-                            
-                            results.append({
-                                'sample_id': sample_id,
-                                'sequence': seq,
-                                'smiles': smiles,
-                                'kcat_pred': None,
-                                'km_pred': None,
-                                'km_pred_log10': None,
-                                'experimental_km_log10': experimental_km_log10,
-                                'km_error_log10': None,
-                                'km_error_relative': None,
-                                'temperature': temperature,
-                                'error': f'Shared PDB file not found: {real_path}'
-                            })
-                            continue
-                    else:
-                        logging.warning(f"Skip sample {sample_id}: PDB file not found ({protein_path})")
-                        if use_sample_manager and sample_manager:
-                            sample_manager.log_failure(sample_id, "missing_pdb", f"PDB file not found: {protein_path}", len(seq))
+                pdb_path = None
+                
+                # 首先检查直接的PDB文件
+                if os.path.exists(pdb_file) and os.path.getsize(pdb_file) > 0:
+                    pdb_path = pdb_file
+                    logging.info(f"Using direct PDB file: {pdb_path}")
+                # 如果PDB文件不存在，检查txt链接文件
+                elif os.path.exists(txt_file):
+                    try:
+                        with open(txt_file, 'r') as f:
+                            linked_pdb_path = f.read().strip()
                         
-                        results.append({
-                            'sample_id': sample_id,
-                            'sequence': seq,
-                            'smiles': smiles,
-                            'kcat_pred': None,
-                            'km_pred': None,
-                            'km_pred_log10': None,
-                            'experimental_km_log10': experimental_km_log10,
-                            'km_error_log10': None,
-                            'km_error_relative': None,
-                            'temperature': temperature,
-                            'error': f'PDB file not found: {protein_path}'
-                        })
-                        continue
+                        if os.path.exists(linked_pdb_path) and os.path.getsize(linked_pdb_path) > 0:
+                            pdb_path = linked_pdb_path
+                            logging.info(f"Using linked PDB file: {pdb_path}")
+                        else:
+                            logging.warning(f"Linked PDB file not found: {linked_pdb_path}")
+                    except Exception as e:
+                        logging.warning(f"Error reading txt file {txt_file}: {e}")
+                
+                if pdb_path is None:
+                    # 文件不存在，记录失败
+                    logging.warning(f"Skip sample {sample_id}: No PDB file found (checked {pdb_file} and {txt_file})")
+                    if use_sample_manager and sample_manager:
+                        sample_manager.log_failure(sample_id, "missing_pdb", f"No PDB file found for {sample_id}", len(seq))
+                    
+                    results.append({
+                        'sample_id': sample_id,
+                        'sequence': seq,
+                        'smiles': smiles,
+                        'kcat_pred': None,
+                        'km_pred': None,
+                        'km_pred_log10': None,
+                        'experimental_km_log10': experimental_km_log10,
+                        'km_error_log10': None,
+                        'km_error_relative': None,
+                        'temperature': temperature,
+                        'error': f'No PDB file found for {sample_id}'
+                    })
+                    continue
             else:
                 pdb_content = structure_processor.predict_structure(seq, uniprot_id)
                 temp_pdb_dir = os.path.join(output_dir, 'temp_pdbs')
@@ -448,6 +442,7 @@ def predict_kinetics_range(input_data, model_path, output_dir='predictions',
     return results_df
 
 if __name__ == '__main__':
+    print("Script started...")
     parser = argparse.ArgumentParser(description="Range prediction script")
     parser.add_argument('--input', type=str, required=True, help='Input CSV file path')
     parser.add_argument('--model', type=str, 
@@ -462,6 +457,7 @@ if __name__ == '__main__':
     parser.add_argument('--docking-timeout', type=int, default=300, help='Docking超时时间（秒），默认300秒（5分钟）')
     
     args = parser.parse_args()
+    print(f"Arguments parsed: {args}")
     
     # Run range prediction
     results = predict_kinetics_range(
