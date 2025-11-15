@@ -454,7 +454,7 @@ if __name__ == '__main__':
     parser.add_argument('--temperature', type=float, default=303.15, help='Temperature (K)')
     parser.add_argument('--use-sample-manager', action='store_true', help='Use SampleManager')
     parser.add_argument('--sample-data-dir', type=str, default='sample_data', help='SampleManager base directory')
-    parser.add_argument('--docking-timeout', type=int, default=300, help='Docking超时时间（秒），默认300秒（5分钟）')
+    parser.add_argument('--docking-timeout', type=int, default=100, help='Docking超时时间（秒），默认300秒（5分钟）')
     
     args = parser.parse_args()
     print(f"Arguments parsed: {args}")

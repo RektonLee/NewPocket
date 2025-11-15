@@ -5,10 +5,10 @@
 # Example: ./run_parallel_fixed.sh 4 parallel_pdb_output_20250926_105227
 
 # Default parameters
-NUM_CHUNKS=${1:-2}       # Default 8 chunks
-INPUT_FILE="kcat_data_successful_pdb1.csv"
+NUM_CHUNKS=${1:-1}       # Default 8 chunks
+INPUT_FILE="kcat_test_model.csv"
 MODEL_PATH="/home/lizihao/Work/enzyme_prediction/src/simple2/outputs/nopqr_attention_rbf/best_model.pt"
-BASE_OUTPUT_DIR="results/parallel_kcatbefore_$(date +%Y%m%d_%H%M%S)"
+BASE_OUTPUT_DIR="results/parallel_kcattest_new_$(date +%Y%m%d_%H%M%S)"
 PDB_BASE_DIR=${2:-"sample_data"}  # PDB文件的基础目录
 
 echo "=========================================="
@@ -71,7 +71,7 @@ for i in $(seq 1 $NUM_CHUNKS); do
         --use-sample-manager \
         --sample-data-dir "$PDB_BASE_DIR" \
         --temperature 303.15 \
-        --docking-timeout 300 \
+        --docking-timeout 70 \
         > "$BASE_OUTPUT_DIR/chunk_${i}.log" 2>&1 &
     
     PIDS+=($!)

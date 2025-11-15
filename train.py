@@ -109,8 +109,15 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
             
             # 只使用kcat标签（第一列）
             actual_batch_size = batch.num_graphs  # 使用实际的 batch size
-            y_reshaped = batch.y.reshape(actual_batch_size, 2)  # [kcat, km]
-            log_y = y_reshaped[:, 0:1]  # 只取kcat列 [batch_size, 1]
+
+            # 如果batch.y只有kcat值，应该这样处理：
+            if batch.y.shape[0] == actual_batch_size:
+                # 只有kcat值
+                log_y = batch.y.reshape(actual_batch_size, 1)
+            else:
+                # 有kcat和km值
+                y_reshaped = batch.y.reshape(actual_batch_size, 2)
+                log_y = y_reshaped[:, 0:1]  # 只取kcat列
             
             if torch.isnan(batch.x).any():
                 print("❌ batch.x 中含有 NaN")
@@ -138,10 +145,15 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
             for batch in val_loader:
                 batch = batch.to(device)
                 
-                # 只使用kcat标签（第一列）
+                # 处理标签 - 适配不同的数据格式
                 actual_batch_size = batch.num_graphs  # 使用实际的 batch size
-                y_reshaped = batch.y.reshape(actual_batch_size, 2)  # [kcat, km]
-                log_y = y_reshaped[:, 0:1]  # 只取kcat列 [batch_size, 1]
+                if batch.y.shape[0] == actual_batch_size:
+                    # 只有kcat值
+                    log_y = batch.y.reshape(actual_batch_size, 1)
+                else:
+                    # 有kcat和km值
+                    y_reshaped = batch.y.reshape(actual_batch_size, 2)
+                    log_y = y_reshaped[:, 0:1]  # 只取kcat列 [batch_size, 1]
                 
                 try:
                     out = model(batch)
@@ -213,9 +225,14 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
             batch = batch.to(device)
             batch_size = batch.num_graphs
             
-            # 只使用kcat标签（第一列），与训练时保持一致
-            y_reshaped = batch.y.reshape(batch_size, 2)
-            log_y = y_reshaped[:, 0:1]  # 只取kcat列
+            # 处理标签 - 适配不同的数据格式，与训练时保持一致
+            if batch.y.shape[0] == batch_size:
+                # 只有kcat值
+                log_y = batch.y.reshape(batch_size, 1)
+            else:
+                # 有kcat和km值
+                y_reshaped = batch.y.reshape(batch_size, 2)
+                log_y = y_reshaped[:, 0:1]  # 只取kcat列
             
             try:
                 out = model(batch)
@@ -286,8 +303,8 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default="kcat_full.pt", help='Path to .pt dataset')
-    parser.add_argument('--save_dir', type=str, default='outputs/kcat_full')
+    parser.add_argument('--dataset', type=str, default="kcat_train_after_new_clean.pt", help='Path to .pt dataset')
+    parser.add_argument('--save_dir', type=str, default='outputs/kcat_after_new')
     args = parser.parse_args()
     from utils.metadata_utils import save_metadata
 

@@ -203,12 +203,12 @@ def enhanced_build_graph(atoms, temperature):
 def main():
     print("开始执行main函数...")
     # 读取你的训练数据
-    df = pd.read_csv('kcat_after_model_new.csv')
+    df = pd.read_csv('successful_docked_kcattest.csv')
     print(f'Loading {len(df)} samples from CSV')
 
     # 设置pocket目录 - 适配新的文件结构
-    POCKET_BASE_DIR = '/home/lizihao/Work/enzyme_prediction/PGNN/kcat_full_after/samples'
-    SAVE_PATH = 'kcat_train_after_new.pt'  # 使用新文件名
+    POCKET_BASE_DIR = '/home/lizihao/Work/enzyme_prediction/PGNN/sample_data/samples'
+    SAVE_PATH = 'kcat_test_new.pt'  # 使用新文件名
 
     dataset = []
     successful_count = 0
@@ -220,8 +220,8 @@ def main():
         kcat_value = row['kcat_value']
         # temperature = row['temperature'] 临时取消     
         temperature=303.15
-        # 使用实际的ec值而不是硬编码
-        ec = row['ec']
+        # 使用实际的ec值而不是硬编码 临时取消   
+        ec = 1
         
         # 计算pocket文件名 - 适配新的文件结构
         pocket_hash = int(hashlib.sha256(smiles.encode()).hexdigest(), 16) & 0xffff

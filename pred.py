@@ -11,9 +11,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from scipy.stats import pearsonr
+import json
 
 # 配置参数 - 与train.py保持一致
-def predict(dataset_path, model_path, save_dir="outputs", batch_size=32):
+def predict(dataset_path, model_path, save_dir="outputs", batch_size=32, model_config=None):
     """
     预测函数，与train.py的配置保持一致
     """
@@ -34,14 +35,28 @@ def predict(dataset_path, model_path, save_dir="outputs", batch_size=32):
     edge_input_dim = data_list[0].edge_attr.shape[1]
     print(f"Node input dim: {node_input_dim}, Edge input dim: {edge_input_dim}")
     
-    # 使用与train.py相同的模型
-    model = MD.PocketGNNKcatOnly(node_input_dim=node_input_dim, edge_input_dim=edge_input_dim,      hidden_dim=128,  # 减小隐藏层
-        num_layers=3,     # 减少层数
-        heads=4,          # 减少注意力头
-        dropout=0.1).to(device)
+    # 使用模型配置（如果提供）或默认配置
+    if model_config is None:
+        # 默认配置（与原始train.py一致）
+        model_config = {
+            'hidden_dim': 128,
+            'num_layers': 3,
+            'heads': 4,
+            'dropout': 0.1
+        }
+    
+    print(f"🔧 使用模型配置: {model_config}")
+    
+    model = MD.PocketGNNKcatOnly(
+        node_input_dim=node_input_dim, 
+        edge_input_dim=edge_input_dim,
+        **model_config
+    ).to(device)
     
     model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
+    model.eval()  # 设置为评估模式，这会自动禁用dropout和其他训练时的行为
+
+    print("🔧 模型已设置为评估模式（dropout已自动禁用）")
 
     # 推理 - 与train.py的处理方式保持一致
     all_y_true = []
@@ -124,6 +139,84 @@ def predict(dataset_path, model_path, save_dir="outputs", batch_size=32):
     create_plots(df, all_y_true.flatten(), all_y_pred.flatten(), save_dir)
     
     return df
+
+def predict_improved(dataset_path, model_path, save_dir="outputs", batch_size=32, 
+                     model_config=None, load_config_from_file=False):
+    """
+    改进模型的预测函数，支持从配置文件加载模型参数
+    """
+    # 如果指定从文件加载配置
+    if load_config_from_file and model_config is None:
+        config_file = os.path.join(os.path.dirname(model_path), "model_config.json")
+        if os.path.exists(config_file):
+            with open(config_file, 'r') as f:
+                model_config = json.load(f)
+            print(f"📁 从文件加载模型配置: {config_file}")
+        else:
+            print(f"⚠️ 配置文件不存在: {config_file}，使用默认配置")
+    
+    # 如果没有提供配置，使用改进模型的默认配置
+    if model_config is None:
+        model_config = {
+            'hidden_dim': 256,  # 改进模型的默认配置
+            'num_layers': 4,
+            'heads': 8,
+            'dropout': 0.2
+        }
+        print(f"🔧 使用改进模型默认配置: {model_config}")
+    
+    # 调用原始预测函数
+    return predict(dataset_path, model_path, save_dir, batch_size, model_config)
+
+def auto_detect_model_config(model_path):
+    """
+    自动检测模型配置类型
+    """
+    model_dir = os.path.dirname(model_path)
+    
+    # 检查是否存在配置文件
+    config_file = os.path.join(model_dir, "model_config.json")
+    if os.path.exists(config_file):
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+        return config, "从配置文件加载"
+    
+    # 根据目录名推断配置类型
+    if "improved" in model_dir.lower():
+        return {
+            'hidden_dim': 256,
+            'num_layers': 4,
+            'heads': 8,
+            'dropout': 0.2
+        }, "改进模型配置"
+    elif "advanced" in model_dir.lower():
+        return {
+            'hidden_dim': 256,
+            'num_layers': 4,
+            'heads': 8,
+            'dropout': 0.2
+        }, "高级模型配置"
+    else:
+        return {
+            'hidden_dim': 128,
+            'num_layers': 3,
+            'heads': 4,
+            'dropout': 0.1
+        }, "原始模型配置"
+
+def predict_auto(dataset_path, model_path, save_dir="outputs", batch_size=32):
+    """
+    自动检测模型类型并进行预测
+    """
+    print(f"🔍 自动检测模型配置...")
+    
+    # 自动检测配置
+    model_config, config_source = auto_detect_model_config(model_path)
+    print(f"📊 检测到配置类型: {config_source}")
+    print(f"🔧 模型配置: {model_config}")
+    
+    # 调用预测函数
+    return predict(dataset_path, model_path, save_dir, batch_size, model_config)
 
 def create_plots(df, y_true, y_pred, save_dir):
     """
@@ -237,11 +330,67 @@ def create_plots(df, y_true, y_pred, save_dir):
     print(f"  📊 kcat_comprehensive_analysis.png - 综合分析图")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default="kcat_test.pt", help='Path to .pt dataset')
-    parser.add_argument('--model', type=str, default='outputs/kcat_full/best_model.pt', help='Path to model')
-    parser.add_argument('--save_dir', type=str, default='outputs/predictions/test_on_full', help='Output directory')
+    parser = argparse.ArgumentParser(description='Prediction script with support for improved models')
+    parser.add_argument('--dataset', type=str, default="kcat_test_new.pt", help='Path to .pt dataset')
+    parser.add_argument('--model', type=str, default='outputs/kcat_after_new/best_model.pt', help='Path to model')
+    parser.add_argument('--save_dir', type=str, default='outputs/predictions/test_on_after_newmodel', help='Output directory')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+    
+    # 新增参数：预测模式
+    parser.add_argument('--mode', type=str, default='original', 
+                       choices=['original', 'improved', 'auto', 'custom'],
+                       help='Prediction mode: original, improved, auto, or custom')
+    
+    # 自定义模型配置参数
+    parser.add_argument('--hidden_dim', type=int, default=None, help='Hidden dimension (for custom mode)')
+    parser.add_argument('--num_layers', type=int, default=None, help='Number of layers (for custom mode)')
+    parser.add_argument('--heads', type=int, default=None, help='Number of attention heads (for custom mode)')
+    parser.add_argument('--dropout', type=float, default=None, help='Dropout rate (for custom mode)')
+    
+    # 配置文件相关参数
+    parser.add_argument('--config_file', type=str, default=None, help='Path to model config JSON file')
+    parser.add_argument('--load_config', action='store_true', help='Load config from model directory')
+    
     args = parser.parse_args()
     
-    predict(args.dataset, args.model, args.save_dir, args.batch_size)
+    print("🚀 开始预测...")
+    print(f"📁 数据集: {args.dataset}")
+    print(f"🤖 模型: {args.model}")
+    print(f"💾 保存目录: {args.save_dir}")
+    print(f"🔧 批次大小: {args.batch_size}")
+    print(f"📊 预测模式: {args.mode}")
+    
+    # 根据模式选择预测函数
+    if args.mode == 'original':
+        print("📊 使用原始模型配置进行预测")
+        predict(args.dataset, args.model, args.save_dir, args.batch_size)
+        
+    elif args.mode == 'improved':
+        print("📊 使用改进模型配置进行预测")
+        model_config = None
+        if args.load_config:
+            model_config = None  # 让函数自动从文件加载
+        elif args.config_file:
+            with open(args.config_file, 'r') as f:
+                model_config = json.load(f)
+        predict_improved(args.dataset, args.model, args.save_dir, args.batch_size, 
+                        model_config, args.load_config)
+        
+    elif args.mode == 'custom':
+        print("📊 使用自定义模型配置进行预测")
+        if not all([args.hidden_dim, args.num_layers, args.heads, args.dropout is not None]):
+            print("❌ 自定义模式需要提供所有模型参数: --hidden_dim, --num_layers, --heads, --dropout")
+            exit(1)
+        
+        model_config = {
+            'hidden_dim': args.hidden_dim,
+            'num_layers': args.num_layers,
+            'heads': args.heads,
+            'dropout': args.dropout
+        }
+        print(f"🔧 自定义配置: {model_config}")
+        predict(args.dataset, args.model, args.save_dir, args.batch_size, model_config)
+        
+    else:  # auto mode
+        print("📊 自动检测模型配置进行预测")
+        predict_auto(args.dataset, args.model, args.save_dir, args.batch_size)
