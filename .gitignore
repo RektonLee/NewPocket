@@ -1,38 +1,131 @@
-# 忽略所有文件
-*
-# 只保留指定文件类型（包括子目录）
-!*.py
-!*.md
-!*.sh
-!.gitignore
-
-# 忽略特定目录和文件
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+*.so
 .Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyTorch
+*.pt
+*.pth
+*.pkl
+*.ckpt
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 数据文件
+*.csv
+*.tsv
+*.xlsx
+*.xls
+data/
+sample_data/
+samples/
+*.pdb
+*.pdbqt
+*.fasta
+*.fa
+
+# 输出目录
+outputs/
+output/
+results/
+predictions/
+temp_pdbs/
+tmp/
+autosite_out/
+
+# 日志文件
 *.log
+logs/
+*.log.*
+
+# 缓存文件
+.cache/
+*.cache
+sequence_database.json
+pdb_report.json
+
+# 环境配置
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+conda_env.yml
+
+# 模型和检查点
+checkpoints/
+models/
+*.h5
+*.pb
+
+# 临时文件
 *.tmp
 *.temp
-.git/
-.cursorignore
+*.bak
+*.backup
+*~
 
-# 忽略数据目录
-sample_data/
-results/
-output/
-predictions/
-notemp*/
-test_*/
-tmp/
+# 系统文件
+Thumbs.db
+.DS_Store
+.directory
+
+# 特定项目文件
+failed_samples.txt
+successful_docked_*.csv
+kcat_*.csv
+km_*.csv
+*_test*.csv
+*_train*.csv
+*_val*.csv
+
+# 并行处理临时文件
+*.sh.*
+*.lock
+
+# 报告和可视化
 *.png
 *.jpg
 *.jpeg
+*.pdf
+*.svg
+*.html
+reports/
+visualizations/
 
-# 忽略特定文件
-pdb_generation.log
-test_run.log
-sequence_length_analysis.png
-!utils/*
-!utils/  
+# 其他
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
