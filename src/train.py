@@ -13,12 +13,25 @@ matplotlib.use('Agg')  # 确保在没有GUI的环境中使用
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
-from utils.metadata_utils import update_training_results
 import wandb
 
+try:
+    from utils.metadata_utils import update_training_results, save_metadata  # type: ignore
+except Exception:
+    update_training_results = None
+    save_metadata = None
+
+def _set_seed(seed: int) -> None:
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
 def compute_metrics(y_true_log, y_pred_log):
-    y_true_log = y_true_log.numpy()
-    y_pred_log = y_pred_log.numpy()
+    if torch.is_tensor(y_true_log):
+        y_true_log = y_true_log.detach().cpu().numpy()
+    if torch.is_tensor(y_pred_log):
+        y_pred_log = y_pred_log.detach().cpu().numpy()
     return {
         'MAE': mean_absolute_error(y_true_log, y_pred_log),
         'RMSE': np.sqrt(mean_squared_error(y_true_log, y_pred_log)),
@@ -26,37 +39,48 @@ def compute_metrics(y_true_log, y_pred_log):
         'Pearson': pearsonr(y_true_log.flatten(), y_pred_log.flatten())[0]
     }
 
-def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=500):
-    dataset = torch.load(dataset_path, weights_only=False)
+def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=500, seed: int = 42, device: str | None = None, use_wandb: bool = True):
+    _set_seed(seed)
+
+    data_list = torch.load(dataset_path, weights_only=False)
     
     # 检查数据集是否包含 NaN
-    for data in dataset:
+    for data in data_list:
         if torch.isnan(data.x).any() or torch.isnan(data.y).any():
             raise ValueError("数据集中包含 NaN 值")
     
-    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    if device is None:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = torch.device(device)
     os.makedirs(save_dir, exist_ok=True)
     writer = SummaryWriter(save_dir)
     
     # 初始化 wandb
-    wandb.login(key="46dbe55e52d029976ffa0e29c90f0d32410e1504")
-    wandb.init(
-        project="enzyme-kcat-prediction",
-        name=os.path.basename(save_dir),
-        config={
-            "dataset": os.path.basename(dataset_path),
-            "batch_size": batch_size,
-            "lr": lr,
-            "max_epochs": max_epochs,
-            "device": str(device),
-        }
-    )
+    run = None
+    if use_wandb:
+        # 不要在代码里硬编码密钥：使用环境变量 WANDB_API_KEY 或者提前 `wandb login`
+        try:
+            if os.environ.get("WANDB_API_KEY"):
+                wandb.login(key=os.environ["WANDB_API_KEY"])
+            run = wandb.init(
+                project="enzyme-kcat-prediction",
+                name=os.path.basename(save_dir),
+                config={
+                    "dataset": os.path.basename(dataset_path),
+                    "batch_size": batch_size,
+                    "lr": lr,
+                    "max_epochs": max_epochs,
+                    "seed": seed,
+                    "device": str(device),
+                }
+            )
+        except Exception:
+            run = None
 
     # === Load dataset ===
-    data_list = torch.load(dataset_path, weights_only=False)  # List[Data]
     print(data_list[0])  # 打印第一个图数据
-    actual_num_atom_types = data_list[0].x.shape[1]
-    np.random.shuffle(data_list)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(data_list)
     split = int(0.8 * len(data_list))
     train_loader = DataLoader(data_list[:split], batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(data_list[split:], batch_size=batch_size)
@@ -74,14 +98,15 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     dropout = 0.1     # Dropout 概率
 
     # 更新 wandb config 包含模型参数
-    wandb.config.update({
-        "node_input_dim": node_input_dim,
-        "edge_input_dim": edge_input_dim,
-        "hidden_dim": hidden_dim,
-        "num_layers": num_layers,
-        "heads": heads,
-        "dropout": dropout,
-    })
+    if run is not None:
+        wandb.config.update({
+            "node_input_dim": node_input_dim,
+            "edge_input_dim": edge_input_dim,
+            "hidden_dim": hidden_dim,
+            "num_layers": num_layers,
+            "heads": heads,
+            "dropout": dropout,
+        })
 
     model = MD.PocketGNNKcatOnly(
         node_input_dim=node_input_dim,
@@ -102,23 +127,24 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     pearson_history = []
     
     # 将本次训练的关键超参数与环境信息记录到共享表中（保持运行中状态）
-    try:
-        update_training_results(
-            save_dir=save_dir,
-            status="running",
-            model_hidden_dim=hidden_dim,
-            model_num_layers=num_layers,
-            model_heads=heads,
-            model_dropout=dropout,
-            lr=lr,
-            batch_size=batch_size,
-            max_epochs=max_epochs,
-            node_input_dim=node_input_dim,
-            edge_input_dim=edge_input_dim,
-            device=str(device)
-        )
-    except Exception as _:
-        pass
+    if update_training_results is not None:
+        try:
+            update_training_results(
+                save_dir=save_dir,
+                status="running",
+                model_hidden_dim=hidden_dim,
+                model_num_layers=num_layers,
+                model_heads=heads,
+                model_dropout=dropout,
+                lr=lr,
+                batch_size=batch_size,
+                max_epochs=max_epochs,
+                node_input_dim=node_input_dim,
+                edge_input_dim=edge_input_dim,
+                device=str(device)
+            )
+        except Exception:
+            pass
 
     for epoch in range(1, max_epochs + 1):
         model.train()
@@ -204,15 +230,16 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
         writer.add_scalar("Pearson/val", metrics['Pearson'], epoch)
         
         # wandb logging
-        wandb.log({
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-            "val_r2": metrics['R2'],
-            "val_pearson": metrics['Pearson'],
-            "val_mae": metrics['MAE'],
-            "val_rmse": metrics['RMSE'],
-        })
+        if run is not None:
+            wandb.log({
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "val_r2": metrics['R2'],
+                "val_pearson": metrics['Pearson'],
+                "val_mae": metrics['MAE'],
+                "val_rmse": metrics['RMSE'],
+            })
 
         print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | R2: {metrics['R2']:.3f}")
 
@@ -222,10 +249,12 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
             model_path = os.path.join(save_dir, "best_model.pt")
             torch.save(model.state_dict(), model_path)
             # 保存最佳模型到 wandb
-            wandb.save(model_path)
+            if run is not None:
+                wandb.save(model_path)
 
     writer.close()
-    wandb.log({"best_val_loss": best_val_loss})
+    if run is not None:
+        wandb.log({"best_val_loss": best_val_loss})
     print("✅ Training finished. Best model saved.")
 
     # 训练结束后绘制图像
@@ -304,7 +333,8 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     plt.savefig(scatter_path)
     plt.close()
     # 上传散点图到 wandb
-    wandb.log({"kcat_scatter": wandb.Image(scatter_path)})
+    if run is not None:
+        wandb.log({"kcat_scatter": wandb.Image(scatter_path)})
     
     # 4. kcat密度图
     plt.figure(figsize=(8, 7))
@@ -320,7 +350,8 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     plt.savefig(density_path)
     plt.close()
     # 上传密度图到 wandb
-    wandb.log({"kcat_density": wandb.Image(density_path)})
+    if run is not None:
+        wandb.log({"kcat_density": wandb.Image(density_path)})
     
     # 保存最终指标到文件
     metrics_df = pd.DataFrame({
@@ -333,36 +364,41 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     metrics_csv_path = os.path.join(save_dir, 'training_metrics.csv')
     metrics_df.to_csv(metrics_csv_path, index=False)
     # 上传指标表格到 wandb
-    wandb.log({"training_metrics": wandb.Table(dataframe=metrics_df)})
+    if run is not None:
+        wandb.log({"training_metrics": wandb.Table(dataframe=metrics_df)})
     
     # 记录最终结果到共享表
-    try:
-        update_training_results(
-            save_dir=save_dir,
-            status="completed",
-            best_val_loss=best_val_loss,
-            final_r2=r2_kcat,
-            final_pearson=pearson_end
-        )
-    except Exception as _:
-        pass
+    if update_training_results is not None:
+        try:
+            update_training_results(
+                save_dir=save_dir,
+                status="completed",
+                best_val_loss=best_val_loss,
+                final_r2=r2_kcat,
+                final_pearson=pearson_end
+            )
+        except Exception:
+            pass
     
     # 记录最终指标到 wandb
-    wandb.log({
-        "final_r2": r2_kcat,
-        "final_pearson": pearson_end,
-        "best_val_loss": best_val_loss,
-    })
+    if run is not None:
+        wandb.log({
+            "final_r2": r2_kcat,
+            "final_pearson": pearson_end,
+            "best_val_loss": best_val_loss,
+        })
     
     # 上传损失曲线和指标曲线到 wandb
     loss_curve_path = os.path.join(save_dir, 'loss_curve.png')
     metrics_curve_path = os.path.join(save_dir, 'metrics_curve.png')
-    if os.path.exists(loss_curve_path):
-        wandb.log({"loss_curve": wandb.Image(loss_curve_path)})
-    if os.path.exists(metrics_curve_path):
-        wandb.log({"metrics_curve": wandb.Image(metrics_curve_path)})
+    if run is not None:
+        if os.path.exists(loss_curve_path):
+            wandb.log({"loss_curve": wandb.Image(loss_curve_path)})
+        if os.path.exists(metrics_curve_path):
+            wandb.log({"metrics_curve": wandb.Image(metrics_curve_path)})
     
-    wandb.finish()
+    if run is not None:
+        wandb.finish()
     print("✅ Training finished. Best model and plots saved to", save_dir)
 
 if __name__ == '__main__':
@@ -370,16 +406,34 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default="kcat_train_after_new_clean.pt", help='Path to .pt dataset')
     parser.add_argument('--save_dir', type=str, default='outputs/kcat_after_new')
+    parser.add_argument('--device', type=str, default=None, help='e.g. "cuda", "cuda:0", "cpu"')
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--max_epochs', type=int, default=500)
+    parser.add_argument('--no_wandb', action='store_true')
     args = parser.parse_args()
-    from utils.metadata_utils import save_metadata
 
     # 训练开始时，加上这行保存metadata
-    save_metadata(
-        save_dir=args.save_dir,
-        dataset_path=args.dataset,
-        graph_builder_version='enhanced_builder',
-        gnn_model_version='PocketGNNKcatOnly',
-        comments='Enhanced features + kcat-only prediction + angle features,9124 items ,simplist model'
-    )
+    if save_metadata is not None:
+        try:
+            save_metadata(
+                save_dir=args.save_dir,
+                dataset_path=args.dataset,
+                graph_builder_version='enhanced_builder',
+                gnn_model_version='PocketGNNKcatOnly',
+                comments='Enhanced features + kcat-only prediction + angle features,9124 items ,simplist model'
+            )
+        except Exception:
+            pass
 
-    train(args.dataset, args.save_dir)
+    train(
+        dataset_path=args.dataset,
+        save_dir=args.save_dir,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        max_epochs=args.max_epochs,
+        seed=args.seed,
+        device=args.device,
+        use_wandb=(not args.no_wandb),
+    )
