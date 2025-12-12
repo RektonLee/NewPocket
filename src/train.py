@@ -2,9 +2,17 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import os
+import sys
 import numpy as np
 from torch_geometric.loader import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+
+# 添加项目根目录到 Python 路径，支持从根目录运行 python src/train.py
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 也添加 src 目录，兼容两种运行方式
+
 import GNN_model as MD
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from scipy.stats import pearsonr
@@ -13,7 +21,7 @@ matplotlib.use('Agg')  # 确保在没有GUI的环境中使用
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
-from utils.metadata_utils import update_training_results
+from metadata_utils import update_training_results
 import wandb
 
 def compute_metrics(y_true_log, y_pred_log):
@@ -367,16 +375,35 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
 
 if __name__ == '__main__':
     import argparse
+    from datetime import datetime
+    
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default="kcat_train_after_new_clean.pt", help='Path to .pt dataset')
-    parser.add_argument('--save_dir', type=str, default='outputs/kcat_after_new')
+    parser.add_argument('--dataset', type=str, default="data/processed/kcat_train_after_new_clean.pt", help='Path to .pt dataset')
+    parser.add_argument('--save_dir', type=str, default=None, help='Output directory (if not specified, will auto-generate with timestamp)')
+    parser.add_argument('--exp_name', type=str, default='kcat_attn_v1', help='Experiment name (semantic, e.g., kcat_attn_v1)')
+    parser.add_argument('--no_timestamp', action='store_true', help='Disable automatic timestamp in save_dir (use fixed path, may overwrite previous results)')
     args = parser.parse_args()
-    from utils.metadata_utils import save_metadata
+    
+    # 如果没有指定 save_dir，自动生成带时间戳的路径
+    if args.save_dir is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        args.save_dir = f'outputs/kcat_{timestamp}'
+    # 如果指定了 save_dir 且没有禁用时间戳，则在路径末尾添加时间戳（避免覆盖）
+    elif not args.no_timestamp:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_dir = args.save_dir.rstrip('/')
+        args.save_dir = f"{base_dir}_{timestamp}"
+    
+    from metadata_utils import save_metadata
 
     # 训练开始时，加上这行保存metadata
+    # exp_name 可以从参数传入，或使用默认值
+    exp_name = getattr(args, 'exp_name', 'kcat_attn_v1')  # 默认实验名称
+    
     save_metadata(
         save_dir=args.save_dir,
         dataset_path=args.dataset,
+        exp_name=exp_name,
         graph_builder_version='enhanced_builder',
         gnn_model_version='PocketGNNKcatOnly',
         comments='Enhanced features + kcat-only prediction + angle features,9124 items ,simplist model'

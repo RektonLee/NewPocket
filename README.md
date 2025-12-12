@@ -45,3 +45,9 @@ python src/generate_pdb_fixed.py --input data/sequences.csv
 - 每次重大修改后，更新 `experiments.md`。
 - 优先使用 `sample_manager.py` 来管理样本路径，避免硬编码。
 
+
+pred_range_fixed是docking的
+
+data/processed/kcat_test_new.pt,PT文件类型: <class 'list'>
+List length: 1455
+第一个元素: Data(x=[206, 52], edge_index=[2, 1800], edge_attr=[1800, 24], pos=[206, 3], temperature=[1], y=[1], pdb_id='kcat_test_0004_61714_10A.pdb', sample_id='kcat_test_0004', ec=1)

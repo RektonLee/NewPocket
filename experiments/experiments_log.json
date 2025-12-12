@@ -1,0 +1,24 @@
+{
+  "exp_20251212_180839": {
+    "experiment_id": "exp_20251212_180839",
+    "timestamp": "20251212_180839",
+    "start_time": "2025-12-12T18:08:39.415152",
+    "save_dir": "outputs/kcat_after_new",
+    "dataset_path": "data/processed/kcat_train_after_new_clean.pt",
+    "model_version": "PocketGNNKcatOnly",
+    "graph_builder_version": "enhanced_builder",
+    "comments": "Enhanced features + kcat-only prediction + angle features,9124 items ,simplist model",
+    "status": "running",
+    "parameters": {},
+    "model_hidden_dim": 128,
+    "model_num_layers": 3,
+    "model_heads": 4,
+    "model_dropout": 0.1,
+    "lr": 0.001,
+    "batch_size": 32,
+    "max_epochs": 500,
+    "node_input_dim": 52,
+    "edge_input_dim": 24,
+    "device": "cuda:1"
+  }
+}
