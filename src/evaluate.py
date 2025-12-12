@@ -2,7 +2,7 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 from torch_geometric.loader import DataLoader
-from GNN_model import PocketGNN1
+from GNN_model import PocketGNN1, PocketGNNKcatOnly
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from scipy.stats import pearsonr
 from scipy import stats
@@ -15,14 +15,23 @@ def compute_metrics(y_true, y_pred):
     y_true = y_true.numpy() if torch.is_tensor(y_true) else np.array(y_true)
     y_pred = y_pred.numpy() if torch.is_tensor(y_pred) else np.array(y_pred)
     
-    # 分别计算kcat和Km的指标
+    # 分别计算kcat和Km的指标（若只有1维则只算kcat）
     metrics = {}
-    for i, name in enumerate(['kcat', 'Km']):
+    if y_true.ndim == 1 or y_true.shape[1] == 1:
+        yt = y_true.reshape(-1)
+        yp = y_pred.reshape(-1)
         metrics.update({
-            f'{name}_MAE': mean_absolute_error(y_true[:,i], y_pred[:,i]),
-            f'{name}_R2': r2_score(y_true[:,i], y_pred[:,i]),
-            f'{name}_Pearson': pearsonr(y_true[:,i], y_pred[:,i])[0]
+            'kcat_MAE': mean_absolute_error(yt, yp),
+            'kcat_R2': r2_score(yt, yp),
+            'kcat_Pearson': pearsonr(yt, yp)[0],
         })
+    else:
+        for i, name in enumerate(['kcat', 'Km']):
+            metrics.update({
+                f'{name}_MAE': mean_absolute_error(y_true[:, i], y_pred[:, i]),
+                f'{name}_R2': r2_score(y_true[:, i], y_pred[:, i]),
+                f'{name}_Pearson': pearsonr(y_true[:, i], y_pred[:, i])[0]
+            })
     
     # 添加综合指标
     metrics.update({
@@ -30,26 +39,28 @@ def compute_metrics(y_true, y_pred):
         'Overall_R2': r2_score(y_true, y_pred)
     })
     return metrics
-    # 将y_true从[N*2] reshape为[N,2]并取对数
-    # y_true = y_true.view(-1, 2).numpy()
-    y_true_log =y_true # 避免log(0)
-    
-    y_pred = y_pred.numpy()
-    
-    return {
-        'MAE': mean_absolute_error(y_true_log, y_pred),
-        'RMSE': np.sqrt(mean_squared_error(y_true_log, y_pred)),
-        'R2': r2_score(y_true_log, y_pred),
-        'Pearson': pearsonr(y_true_log.flatten(), y_pred.flatten())[0]
-    }
 
 def scatter_plot(y_true, y_pred, save_path):
-    # 这里已经分别绘制了kcat和Km的散点图
-    plt.scatter(y_true[:,0], y_pred[:,0], label='kcat')  # 第一维是kcat
-    plt.scatter(y_true[:,1], y_pred[:,1], label='Km')    # 第二维是Km
-    plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], 'k--')
-    plt.xlabel('True')
-    plt.ylabel('Predicted')
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    plt.figure(figsize=(8, 6))
+
+    if y_true.ndim == 1 or y_true.shape[1] == 1:
+        yt = y_true.reshape(-1)
+        yp = y_pred.reshape(-1)
+        plt.scatter(yt, yp, alpha=0.6, label='kcat')
+        vmin = min(yt.min(), yp.min())
+        vmax = max(yt.max(), yp.max())
+        plt.plot([vmin, vmax], [vmin, vmax], 'k--')
+    else:
+        plt.scatter(y_true[:, 0], y_pred[:, 0], label='kcat', alpha=0.6)
+        plt.scatter(y_true[:, 1], y_pred[:, 1], label='Km', alpha=0.6)
+        vmin = min(y_true.min(), y_pred.min())
+        vmax = max(y_true.max(), y_pred.max())
+        plt.plot([vmin, vmax], [vmin, vmax], 'k--')
+
+    plt.xlabel('True (log10)')
+    plt.ylabel('Predicted (log10)')
     plt.legend()
     plt.title('Predicted vs True')
     plt.tight_layout()
@@ -118,21 +129,35 @@ def plot_importance_heatmap(importances, save_path):
     plt.close()
 
 def evaluate(dataset_path, model_path, save_dir="outputs"):
-    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     os.makedirs(save_dir, exist_ok=True)
 
     # Load data
     dataset = torch.load(dataset_path)
     loader = DataLoader(dataset, batch_size=32)
 
-    # Load model
+    # Load model (根据数据维度选择kcat-only或kcat+Km)
     sample_data = dataset[0]
     node_feature_dim = sample_data.x.size(1)
     edge_feature_dim = sample_data.edge_attr.size(1)
-    model = PocketGNN1(
-        node_input_dim=node_feature_dim,
-        edge_input_dim=edge_feature_dim,
-    ).to(device)
+
+    y_dim = int(sample_data.y.numel()) if hasattr(sample_data, "y") else 2
+    if y_dim == 1:
+        # 默认与 train.py 超参保持一致
+        model = PocketGNNKcatOnly(
+            node_input_dim=node_feature_dim,
+            edge_input_dim=edge_feature_dim,
+            hidden_dim=128,
+            num_layers=3,
+            heads=4,
+            dropout=0.1,
+        ).to(device)
+    else:
+        model = PocketGNN1(
+            node_input_dim=node_feature_dim,
+            edge_input_dim=edge_feature_dim,
+        ).to(device)
+
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
@@ -166,17 +191,18 @@ def evaluate(dataset_path, model_path, save_dir="outputs"):
         for batch in loader:
             batch = batch.to(device)
             pred = model(batch)
-            true_log = torch.log10(batch.y.view(-1, 2))
-            y_true.append(true_log.cpu())
+            # 训练数据在构建时已经做了 log10（见 graph_builder_rbf.py / build_graph_dataset.py）
+            # 因此这里直接使用 batch.y
+            if y_dim == 1:
+                true_log = batch.y.view(-1, 1)
+            else:
+                true_log = batch.y.view(-1, 2)
+            y_true.append(true_log.detach().cpu())
             y_pred.append(pred.cpu())
 
     y_true = torch.cat(y_true, dim=0)
     y_pred = torch.cat(y_pred, dim=0)
 
-    # metrics = compute_metrics(y_true, y_pred)
-    # print("\n📊 Evaluation Metrics:")
-    # for k, v in metrics.items():
-    #     print(f"{k}: {v:.4f}")
     residual_analysis(y_true.numpy(), y_pred.numpy(), save_dir)
     print(f"✅ Residual analysis saved to {save_dir}/residual_analysis.png")
 

@@ -36,6 +36,10 @@ import json
 import hashlib
 from pathlib import Path
 
+# Python 的内置 hash() 每次运行会随机化，不适合做缓存key
+def _stable_hash(text: str, length: int = 16) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:length]
+
 # 创建日志目录
 os.makedirs('output/logs', exist_ok=True)
 
@@ -97,6 +101,11 @@ class ProteinStructureProcessor:
         
         # 新增: SampleManager支持
         self.sample_manager = sample_manager
+
+        # ESMFold 延迟加载（避免每个样本重复下载/加载模型）
+        self._esm_tokenizer = None
+        self._esm_model = None
+        self._esm_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # 初始化统计信息
         self.stats = {
@@ -105,6 +114,19 @@ class ProteinStructureProcessor:
             "esm_predicted": 0, # 使用ESM预测的数量
             "failed": 0        # 失败的数量
         }
+
+    def _get_esmfold(self):
+        if self._esm_tokenizer is None or self._esm_model is None:
+            self._esm_tokenizer = AutoTokenizer.from_pretrained("facebook/esmfold_v1")
+            self._esm_model = EsmForProteinFolding.from_pretrained(
+                "facebook/esmfold_v1",
+                low_cpu_mem_usage=True
+            )
+            self._esm_model = self._esm_model.to(self._esm_device)
+            self._esm_model.eval()
+            if self._esm_device.type == "cuda":
+                torch.backends.cuda.matmul.allow_tf32 = True
+        return self._esm_tokenizer, self._esm_model, self._esm_device
 
     def predict_structure_with_sample_id(self, sample_id, sequence, uniprot_id=None):
         """
@@ -158,12 +180,9 @@ class ProteinStructureProcessor:
             #     logging.warning(f"⚠️ 序列过长，生成dummy结构: {sample_id} (长度: {len(sequence)})")
             #     return pdb_content
             
-            tokenizer = AutoTokenizer.from_pretrained("facebook/esmfold_v1")
-            model = EsmForProteinFolding.from_pretrained("facebook/esmfold_v1", low_cpu_mem_usage=True)
-            model = model.cuda() # 如果有GPU, 使用cuda
-            torch.backends.cuda.matmul.allow_tf32 = True
+            tokenizer, model, device = self._get_esmfold()
             tokenized_input = tokenizer([sequence], return_tensors="pt", add_special_tokens=False)['input_ids']
-            tokenized_input = tokenized_input.cuda() # 如果有GPU, 使用cuda
+            tokenized_input = tokenized_input.to(device)
             with torch.no_grad():
                 output = model(tokenized_input)
 
@@ -204,7 +223,7 @@ class ProteinStructureProcessor:
                     return f.read()
 
         # 如果没有 UniProt ID，则使用序列哈希值
-        sequence_hash = hash(sequence)
+        sequence_hash = _stable_hash(sequence)
         pdb_cache_path = os.path.join(self.cache_dir, f"{sequence_hash}.pdb")
         if os.path.exists(pdb_cache_path):
             logging.info(f"使用缓存的 PDB 结构: {pdb_cache_path}")
@@ -227,12 +246,9 @@ class ProteinStructureProcessor:
             logging.info(f"使用 ESMFold 预测蛋白质结构")
             
             # 使用文中加载 ESM 的方法
-            tokenizer = AutoTokenizer.from_pretrained("facebook/esmfold_v1")
-            model = EsmForProteinFolding.from_pretrained("facebook/esmfold_v1", low_cpu_mem_usage=True)
-            model = model.cuda() # 如果有GPU, 使用cuda
-            torch.backends.cuda.matmul.allow_tf32 = True
+            tokenizer, model, device = self._get_esmfold()
             tokenized_input = tokenizer([sequence], return_tensors="pt", add_special_tokens=False)['input_ids']
-            tokenized_input = tokenized_input.cuda() # 如果有GPU, 使用cuda
+            tokenized_input = tokenized_input.to(device)
             with torch.no_grad():
                 output = model(tokenized_input)
 
@@ -425,9 +441,12 @@ class ProteinStructureProcessor:
     def _detect_pockets_with_fpocket(self, pdb_path):
         """使用fpocket检测蛋白质口袋"""
         # 运行fpocket
-        fpocket_path = "/home/lizihao/Work/enzyme_prediction/fpocket" 
         output_dir = pdb_path.replace('.pdb', '_out')
-        cmd = ["fpocket", '-f', pdb_path]
+        import shutil
+        fpocket_bin = shutil.which("fpocket")
+        if not fpocket_bin:
+            raise FileNotFoundError("fpocket not found in PATH")
+        cmd = [fpocket_bin, '-f', pdb_path]
         
         try:
             subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -711,7 +730,7 @@ class MoleculeEmbeddingGenerator:
         if not smiles or pd.isna(smiles):
             return np.zeros(768)  # 默认嵌入维度
         
-        smiles_hash = hash(smiles)
+        smiles_hash = _stable_hash(smiles)
         cache_file = os.path.join(self.cache_dir, f"{smiles_hash}.npy")
         
         if os.path.exists(cache_file):
@@ -836,8 +855,9 @@ def load_and_preprocess_data(data_path, timestamp=None, save_processed=True, sav
             logger.error(f"初始化分子嵌入生成器失败: {e}")
             raise RuntimeError(f"初始化分子嵌入生成器失败: {e}")
         
-       # 处理蛋白质结构和活性位点
+        # 处理蛋白质结构和活性位点
         binding_site_graphs = []  # 改为存储图数据
+        binding_site_features = None  # 历史遗留：目前流程使用图数据，不再生成固定长度特征矩阵
         protein_sequences = []
         
         for i, row in tqdm(df.iterrows(), total=len(df), desc="处理蛋白质结构"):
@@ -883,7 +903,6 @@ def load_and_preprocess_data(data_path, timestamp=None, save_processed=True, sav
         
         # 转换为numpy数组
         substrate_embeddings = np.array(substrate_embeddings)
-        binding_site_features = np.array(binding_site_features)
         
         # 处理标签 (取log)
         y = np.column_stack([
@@ -895,7 +914,7 @@ def load_and_preprocess_data(data_path, timestamp=None, save_processed=True, sav
         indices = np.arange(len(df))
         train_indices, test_indices = train_test_split(indices, test_size=0.2, random_state=42)
         
-        logger.info(f"特征形状 - 活性位点: {binding_site_features.shape}, 底物: {substrate_embeddings.shape}")
+        logger.info(f"特征形状 - 活性位点图数量: {len(binding_site_graphs)}, 底物: {substrate_embeddings.shape}")
         
         # 创建数据加载器
         # 创建数据加载器
@@ -1029,7 +1048,7 @@ def save_processed_data_visualization(binding_site_features, substrate_embedding
     # 1. 保存基本统计信息
     stats = {
         "数据集大小": len(y),
-        "活性位点特征形状": binding_site_features.shape,
+        "活性位点特征形状": (binding_site_features.shape if binding_site_features is not None else "N/A"),
         "底物嵌入形状": substrate_embeddings.shape,
         "标签形状": y.shape,
         "Km范围": [float(np.min(y[:, 0])), float(np.max(y[:, 0]))],
@@ -1049,7 +1068,7 @@ def save_processed_data_visualization(binding_site_features, substrate_embedding
             "底物SMILES": substrate_smiles[i],
             "log10(Km)": y[i, 0],
             "log10(kcat)": y[i, 1],
-            "活性位点非零特征数": np.count_nonzero(binding_site_features[i]),
+            "活性位点非零特征数": (int(np.count_nonzero(binding_site_features[i])) if binding_site_features is not None else -1),
             "底物嵌入前5个值": substrate_embeddings[i][:5].tolist()
         })
     
@@ -1059,12 +1078,16 @@ def save_processed_data_visualization(binding_site_features, substrate_embedding
 
     plt.figure(figsize=(12, 8))
     
-    # Binding site feature distribution
+    # Binding site feature distribution（若存在）
     plt.subplot(2, 2, 1)
-    sns.histplot(binding_site_features.flatten(), bins=50)
-    plt.title("Binding Site Feature Distribution")
-    plt.xlabel("Feature Value")
-    plt.ylabel("Frequency")
+    if binding_site_features is not None:
+        sns.histplot(binding_site_features.flatten(), bins=50)
+        plt.title("Binding Site Feature Distribution")
+        plt.xlabel("Feature Value")
+        plt.ylabel("Frequency")
+    else:
+        plt.title("Binding Site Feature Distribution (N/A)")
+        plt.axis("off")
     
     # Substrate embedding distribution
     plt.subplot(2, 2, 2)
@@ -1087,37 +1110,28 @@ def save_processed_data_visualization(binding_site_features, substrate_embedding
     plt.xlabel("log10(kcat)")
     plt.ylabel("Frequency")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "feature_distributions.png"))
+    plt.savefig(os.path.join(viz_dir, "feature_distributions.png"))
     
     # 修改相关性热图的标题
     plt.figure(figsize=(10, 8))
     
-    # 计算相关性矩阵
-    n_features = min(20, binding_site_features.shape[2])
-    selected_features = np.random.choice(binding_site_features.shape[2], n_features, replace=False)
-    feature_sample = binding_site_features[:, 0, selected_features]
-    corr_matrix = np.corrcoef(feature_sample.T)
-    
-    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt=".2f")
-    plt.title("Binding Site Feature Correlations")
-    plt.savefig(os.path.join(output_dir, "feature_correlations.png"))
+    # 计算相关性矩阵（若存在）
+    if binding_site_features is not None and binding_site_features.ndim >= 3:
+        n_features = min(20, binding_site_features.shape[2])
+        selected_features = np.random.choice(binding_site_features.shape[2], n_features, replace=False)
+        feature_sample = binding_site_features[:, 0, selected_features]
+        corr_matrix = np.corrcoef(feature_sample.T)
+        
+        sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt=".2f")
+        plt.title("Binding Site Feature Correlations")
+        plt.savefig(os.path.join(viz_dir, "feature_correlations.png"))
+    else:
+        plt.title("Binding Site Feature Correlations (N/A)")
+        plt.axis("off")
    
    
     
-    # 4. 保存特征相关性热图
-    plt.figure(figsize=(10, 8))
-    
-    # 随机选择一些活性位点特征
-    n_features = min(20, binding_site_features.shape[2])
-    selected_features = np.random.choice(binding_site_features.shape[2], n_features, replace=False)
-    
-    # 计算相关性
-    feature_sample = binding_site_features[:, 0, selected_features]  # 使用第一个原子的特征
-    corr_matrix = np.corrcoef(feature_sample.T)
-    
-    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt=".2f")
-    plt.title("Binding Site Feature Correlations")
-    plt.savefig(os.path.join(viz_dir, "feature_correlations.png"))
+    # 4.（历史重复图）保留一个相关性热图即可，这里不再重复生成
     
     # 5. 保存原始数据样本
     with open(os.path.join(viz_dir, "raw_samples.txt"), "w", encoding="utf-8") as f:
@@ -1127,30 +1141,32 @@ def save_processed_data_visualization(binding_site_features, substrate_embedding
             f.write(f"底物SMILES: {substrate_smiles[i]}\n")
             f.write(f"log10(Km): {y[i, 0]}\n")
             f.write(f"log10(kcat): {y[i, 1]}\n")
-            f.write(f"活性位点特征前10个: {binding_site_features[i, 0, :10].tolist()}\n")
+            if binding_site_features is not None and binding_site_features.ndim >= 3:
+                f.write(f"活性位点特征前10个: {binding_site_features[i, 0, :10].tolist()}\n")
             f.write(f"底物嵌入前10个: {substrate_embeddings[i][:10].tolist()}\n")
             f.write("\n" + "-"*50 + "\n\n")
     
     # 6. 保存3D可视化数据（用于后续可视化）
     binding_site_viz_data = []
-    for i in range(min(5, len(binding_site_features))):
-        # 提取非零原子
-        atoms = []
-        for j in range(binding_site_features.shape[1]):
-            if np.any(binding_site_features[i, j, 1:4] != 0):  # 检查坐标是否非零
-                atom_type = int(binding_site_features[i, j, 0])
-                coords = binding_site_features[i, j, 1:4]
-                atoms.append({
-                    "type": atom_type,
-                    "coords": coords.tolist()
-                })
-        
-        binding_site_viz_data.append({
-            "sample_id": i,
-            "protein": protein_sequences[i][:50] + "...",
-            "substrate": substrate_smiles[i],
-            "atoms": atoms
-        })
+    if binding_site_features is not None and binding_site_features.ndim >= 3:
+        for i in range(min(5, len(binding_site_features))):
+            # 提取非零原子
+            atoms = []
+            for j in range(binding_site_features.shape[1]):
+                if np.any(binding_site_features[i, j, 1:4] != 0):  # 检查坐标是否非零
+                    atom_type = int(binding_site_features[i, j, 0])
+                    coords = binding_site_features[i, j, 1:4]
+                    atoms.append({
+                        "type": atom_type,
+                        "coords": coords.tolist()
+                    })
+            
+            binding_site_viz_data.append({
+                "sample_id": i,
+                "protein": protein_sequences[i][:50] + "...",
+                "substrate": substrate_smiles[i],
+                "atoms": atoms
+            })
     
     # 保存为JSON
     import json
@@ -1188,10 +1204,10 @@ def save_processed_data_visualization(binding_site_features, substrate_embedding
         </div>
         
         <h2>特征分布</h2>
-        <img src="feature_distributions.png" alt="特征分布图">
+        <img src="feature_distributions.png" alt="Feature distributions">
         
         <h2>特征相关性</h2>
-        <img src="feature_correlations.png" alt="特征相关性热图">
+        <img src="feature_correlations.png" alt="Feature correlations">
         
         <h2>样本数据</h2>
         <table>
@@ -1251,11 +1267,11 @@ if __name__ == "__main__":
     
     # 处理数据
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    train_loader, test_loader, binding_site_features, substrate_embeddings, y, train_indices, test_indices = load_and_preprocess_pdbdata(
+    train_loader, test_loader, binding_site_features, substrate_embeddings, y, train_indices, test_indices = load_and_preprocess_data(
         args.data_path, timestamp=timestamp, save_processed=True, save_visualization=True  # 默认都保存
     )
     
     print(f"数据处理完成，共 {len(y)} 个样本")
-    print(f"活性位点特征形状: {binding_site_features.shape}")
+    print(f"活性位点特征形状: {binding_site_features.shape if binding_site_features is not None else 'N/A'}")
     print(f"底物嵌入形状: {substrate_embeddings.shape}")
     print(f"训练集大小: {len(train_indices)}, 测试集大小: {len(test_indices)}")
