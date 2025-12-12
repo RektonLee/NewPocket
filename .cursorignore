@@ -1,0 +1,10 @@
+# Cursor Ignore
+# 忽略数据目录，避免 AI 索引大量数据文件导致卡顿或上下文污染
+
+data/
+results/
+outputs/
+wandb/
+.git/
+__pycache__/
+
