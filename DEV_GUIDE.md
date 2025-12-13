@@ -64,6 +64,12 @@
     -   **脚本**：`src/pred_range_fixed.py` (⚠️ 注意：此脚本逻辑可能滞后于训练脚本)
     -   **现状**：目前该脚本主要用于旧版双任务模型（$k_{cat}$ + $K_m$）的预测，包含了 Docking 和结构预测的全流程。若用于最新的 `PocketGNNKcatOnly` 模型，需要修改代码以适配单输出维度。
 
+4.  **数据诊断 (Data Diagnosis)** (可选，但强烈推荐在训练前执行)
+    -   **脚本**：`src/analyze_feature_label_relation.py`
+    -   **目的**：在训练 GNN 之前，先回答"数据本身是否包含足够信息"这一核心科学问题
+    -   **用法**：`python src/analyze_feature_label_relation.py --dataset <path> --save_dir <output_dir>`
+    -   **输出**：特征相关性分析、基准模型性能报告（详见"诊断测试功能"部分）
+
 ---
 
 ## 📂 核心代码库 (Active Files)
@@ -78,6 +84,7 @@
 | `src/graph_builder_rbf.py` | **Utils** | 基础图构建工具，定义了 RBF 参数和基础构图逻辑。 | ✅ Active |
 | `src/pred_range_fixed.py` | **Script** | 批量预测脚本。包含从序列到结构再到预测的全流程。 | ⚠️ Needs Update |
 | `src/docking.py` | **Utils** | 处理分子对接（Docking）和 Pocket 提取的逻辑。 | ✅ Active |
+| `src/analyze_feature_label_relation.py` | **Diagnostic** | 数据层诊断脚本。分析图统计特征与 kcat 的相关性，不依赖 GNN 模型。 | ✅ Active |
 | `metadata_utils.py` | **Utils** | 管理实验元数据和结果记录。 | ✅ Active |
 
 ---
@@ -178,6 +185,23 @@
 - **预期结果**：
   - 性能 ≈ baseline → encoder 已饱和
   - 性能明显下降 → encoder 仍需端到端优化
+
+### Test 3: Feature-Label Correlation Analysis (数据层诊断)
+- **脚本**：`src/analyze_feature_label_relation.py`
+- **目的**：回答"数据本身是否包含足够信息"这一核心科学问题（不依赖 GNN 模型）
+- **用法**：`python src/analyze_feature_label_relation.py --dataset <path> --save_dir <output_dir>`
+- **原理**：
+  1. 将图结构压缩为统计特征（节点/边特征的均值/方差、几何半径等）
+  2. 计算每个特征与 $k_{cat}$ 的 Pearson/Spearman 相关系数
+  3. 使用简单模型（Linear/Ridge、Random Forest）测试数据本身的"信息上限"
+- **输出**：
+  - `feature_correlations.csv`: 所有特征的相关性排序
+  - `model_baselines.csv`: 基准模型性能（Linear 和 RF）
+  - 可视化图表（相关性散点图、预测散点图）
+- **结果解读**：
+  - 如果最大 |Pearson| < 0.1 且 RF Test Pearson < 0.3 → **数据表示本身信息不足**
+  - 如果最大 |Pearson| >= 0.3 且 RF Test Pearson >= 0.5 → **数据包含足够信号，问题可能在模型**
+- **重要性**：这是**数据层**的诊断，比模型层诊断更底层、更硬核
 
 详细说明请参考 `Todiagnose.md` 和 `DIAGNOSTIC_RESULTS.md`。
 

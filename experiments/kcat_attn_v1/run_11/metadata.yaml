@@ -1,0 +1,11 @@
+dataset_path: data/processed/kcat_train_after_new_clean.pt
+exp_name: kcat_attn_v1
+git_commit: e34f730
+graph_builder_version: enhanced_builder
+model_version: PocketGNNKcatOnly
+note: Enhanced features + kcat-only prediction + angle features,9124 items ,simplist
+  model
+run_id: run_11
+save_dir: outputs/kcat_20251213_145943
+start_time: '2025-12-13T14:59:43.413254'
+status: running

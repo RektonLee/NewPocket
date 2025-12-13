@@ -204,6 +204,35 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     # 这对于 Frozen Encoder Test 很重要，需要与 baseline 使用相同的验证集
     np.random.seed(42)
     np.random.shuffle(data_list)
+    
+    # === 清理 Data 对象：移除字符串属性（PyG DataLoader 无法 collate 字符串） ===
+    # PyG 的 DataLoader 会尝试将所有属性 collate 成 tensor，但字符串无法转换
+    # 需要保留的属性：x, edge_index, edge_attr, pos, y, batch, temperature (如果是 tensor)
+    # 需要移除的属性：pdb_id, sample_id, ec (字符串或非 tensor 类型)
+    print("🧹 清理 Data 对象：移除字符串属性以兼容 DataLoader...")
+    total_removed = 0
+    sample_keys_removed = set()
+    for data in data_list:
+        # 获取所有属性名（keys 是方法，需要调用）
+        keys_to_remove = []
+        for key in data.keys():
+            value = getattr(data, key)
+            # 如果不是 tensor 类型，需要移除（字符串、整数等）
+            if not isinstance(value, torch.Tensor):
+                keys_to_remove.append(key)
+                sample_keys_removed.add(key)
+        
+        # 移除非 tensor 属性
+        for key in keys_to_remove:
+            delattr(data, key)
+            total_removed += 1
+    
+    if total_removed > 0:
+        print(f"✅ 清理完成，共移除了 {total_removed} 个非 tensor 属性")
+        print(f"   移除的属性包括: {', '.join(sorted(sample_keys_removed))}")
+    else:
+        print("✅ 数据已清理，无需移除属性")
+    
     split = int(0.8 * len(data_list))
     train_loader = DataLoader(data_list[:split], batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(data_list[split:], batch_size=batch_size)
@@ -388,7 +417,8 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
                 try:
                     out = model(batch)
                 except ValueError as e:
-                    print(f"❌ NaN 输出，batch中数据文件: {[d.pdb_id for d in batch]}")
+                    # 注意：pdb_id 等字符串属性已在数据清理时移除，无法访问
+                    print(f"❌ NaN 输出，batch 索引: {batch.batch.unique()}")
                     raise e
                 loss = criterion(out, log_y)
                 val_losses.append(loss.item())
@@ -482,7 +512,8 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
             try:
                 out = model(batch)
             except ValueError as e:
-                print(f"❌ NaN 输出，batch中数据文件: {[d.pdb_id for d in batch]}")
+                # 注意：pdb_id 等字符串属性已在数据清理时移除，无法访问
+                print(f"❌ NaN 输出，batch 索引: {batch.batch.unique()}")
                 raise e
             all_y_true.append(log_y.cpu())
             all_y_pred.append(out.cpu())
@@ -575,7 +606,7 @@ if __name__ == '__main__':
     from datetime import datetime
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default="data/processed/kcat_full.pt", help='Path to .pt dataset')
+    parser.add_argument('--dataset', type=str, default="data/processed/kcat_full_1213.pt", help='Path to .pt dataset')
     parser.add_argument('--save_dir', type=str, default=None, help='Output directory (if not specified, will auto-generate with timestamp)')
     parser.add_argument('--exp_name', type=str, default='kcat_attn_v1', help='Experiment name (semantic, e.g., kcat_attn_v1)')
     parser.add_argument('--no_timestamp', action='store_true', help='Disable automatic timestamp in save_dir (use fixed path, may overwrite previous results)')
@@ -601,7 +632,7 @@ if __name__ == '__main__':
 
     # 训练开始时，加上这行保存metadata
     # exp_name 可以从参数传入，或使用默认值
-    exp_name = getattr(args, 'exp_name', 'kcat_attn_v1_fulltrain')  # 默认实验名称
+    exp_name = getattr(args, 'exp_name', 'kcat_attn_fulldata1213')  # 默认实验名称
     
     save_metadata(
         save_dir=args.save_dir,
