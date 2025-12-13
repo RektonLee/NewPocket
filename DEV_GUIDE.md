@@ -225,9 +225,14 @@ Data(x=[321, 52], edge_index=[2, 2814], edge_attr=[2814, 24], pos=[321, 3], temp
 
 
 
-##推荐配置
+##推荐训练配置
 使用 Huber Loss + Early Stopping
 python src/train.py --dataset data/processed/kcat_full_1213.pt \
     --loss_type huber \
     --patience 30 \
     --max_epochs 500
+
+##测试配置
+python src/test.py \
+    --test_dataset data/processed/kcat_test_fixed.pt \
+    --model outputs/kcat_20251213_151558/best_model.pt
