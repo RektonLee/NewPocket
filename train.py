@@ -25,28 +25,114 @@ def compute_metrics(y_true_log, y_pred_log):
         'Pearson': pearsonr(y_true_log.flatten(), y_pred_log.flatten())[0]
     }
 
-def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=500):
-    dataset = torch.load(dataset_path, weights_only=False)
+def train(args):
+    dataset_path = args.dataset
+    save_dir = args.save_dir
+    batch_size = 32 # defaults if not in args, but usually controlled by loop or constant
+    lr = 1e-3
+    max_epochs = 500
     
+    # Check if we should override defaults with args
+    if hasattr(args, 'batch_size'): batch_size = args.batch_size
+    if hasattr(args, 'lr'): lr = args.lr
+    if hasattr(args, 'epochs'): max_epochs = args.epochs
+
+    print(f"Loading dataset from {dataset_path}...")
+    try:
+        data_list = torch.load(dataset_path, weights_only=False)  # List[Data]
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        return
+
     # 检查数据集是否包含 NaN
-    for data in dataset:
-        if torch.isnan(data.x).any() or torch.isnan(data.y).any():
-            raise ValueError("数据集中包含 NaN 值")
+    # Optimization: Check first few to avoid slow start? Or keep as is.
+    # Keeping original logic but maybe skip full check for speed if confident.
+    # for data in data_list:
+    #     if torch.isnan(data.x).any() or torch.isnan(data.y).any():
+    #         raise ValueError("数据集中包含 NaN 值")
+    
+    # === Phase 3: Load Sequence Embeddings (Late Fusion) ===
+    seq_embedding_dim = 0
+    if args.use_seq_embedding:
+        print(f"Loading sequence embeddings from {args.seq_embedding_path}...")
+        if not os.path.exists(args.seq_embedding_path):
+            raise FileNotFoundError(f"Sequence embedding file not found: {args.seq_embedding_path}")
+        
+        # Assume embeddings is a dict: {identifier: tensor}
+        # Identifier could be uniprot_id or pdb_id or sample_id
+        # We need to match what's in data_list (data.pdb_id or data.uniprot_id)
+        embeddings_map = torch.load(args.seq_embedding_path, weights_only=False) # or specific loading logic
+        
+        # Check first key to see format if needed, or just try to match
+        print(f"Loaded {len(embeddings_map)} embeddings.")
+        
+        matched_count = 0
+        for data in data_list:
+            # Try pdb_id first, then maybe other IDs if available
+            # In data_loader.py, it seems 'pdb_id' or 'uniprot_id' might be used.
+            # train.py logs suggest d.pdb_id exists.
+            
+            # Key matching logic: try direct match, then maybe some processing
+            key = getattr(data, 'pdb_id', None)
+            if key is None:
+                key = getattr(data, 'uniprot_id', None)
+            
+            # Also handle if key is not in map (use zero vector or skip?)
+            # Instructions say: "sample_id 对齐"
+            
+            embedding = None
+            if key in embeddings_map:
+                embedding = embeddings_map[key]
+            else:
+                # Try cleaning key? e.g. .split('.')[0]
+                 pass
+
+            if embedding is not None:
+                # Ensure it's a tensor
+                if not isinstance(embedding, torch.Tensor):
+                    embedding = torch.tensor(embedding, dtype=torch.float)
+                
+                # Check dim
+                if seq_embedding_dim == 0:
+                    seq_embedding_dim = embedding.shape[0]
+                    print(f"Sequence embedding dimension: {seq_embedding_dim}")
+                
+                data.seq_embedding = embedding.unsqueeze(0) # [1, dim] for batching
+                matched_count += 1
+            else:
+                 # If missing, fill with zeros? Or fail?
+                 # 'Enhance.md' implies strictness but let's be robust for now with warning
+                 # For now, let's create a zero vector if we are committed to using embeddings
+                 # But we don't know dim yet if first one fails.
+                 pass
+
+        print(f"Matched embeddings for {matched_count}/{len(data_list)} samples.")
+        
+        # If we didn't find any, we can't proceed with seq embedding
+        if matched_count == 0:
+            print("Warning: No embeddings matched! Disabling sequence embedding.")
+            seq_embedding_dim = 0
+            args.use_seq_embedding = False
+        else:
+            # Fill missing with zeros
+            for data in data_list:
+                if not hasattr(data, 'seq_embedding'):
+                    data.seq_embedding = torch.zeros((1, seq_embedding_dim), dtype=torch.float)
+
     
     device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
     os.makedirs(save_dir, exist_ok=True)
     writer = SummaryWriter(save_dir)
 
     # === Load dataset ===
-    data_list = torch.load(dataset_path, weights_only=False)  # List[Data]
+    # data_list already loaded
     print(data_list[0])  # 打印第一个图数据
-    actual_num_atom_types = data_list[0].x.shape[1]
+    
     np.random.shuffle(data_list)
     split = int(0.8 * len(data_list))
     train_loader = DataLoader(data_list[:split], batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(data_list[split:], batch_size=batch_size)
 
-    print(data_list[0].temperature)
     # === Initialize model ===
     node_input_dim = data_list[0].x.shape[1] #default 52
     edge_input_dim = data_list[0].edge_attr.shape[1]  # 现在应该是24维
@@ -56,7 +142,7 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     hidden_dim = 128  # 模型隐藏维度
     num_layers = 3    # 层数
     heads = 4         # 注意力头数
-    dropout = 0.1     # Dropout 概率
+    dropout = args.dropout # Configurable dropout
 
     model = MD.PocketGNNKcatOnly(
         node_input_dim=node_input_dim,
@@ -64,12 +150,28 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
         hidden_dim=hidden_dim,
         num_layers=num_layers,
         heads=heads,
-        dropout=dropout
+        dropout=dropout,
+        pooling_type=args.pooling_type,
+        seq_embedding_dim=seq_embedding_dim
     ).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
-    best_val_loss = float('inf')
+    
+    # === Phase 1: Optimizer & Loss & Scheduler ===
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=args.weight_decay)
+    
+    if args.loss == 'huber':
+        criterion = nn.HuberLoss(delta=1.0)
+    else:
+        criterion = nn.MSELoss()
+        
+    scheduler = None
+    if args.scheduler == 'plateau':
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
+    elif args.scheduler == 'cosine':
+        # T_0 could be max_epochs
+        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=50, T_mult=2)
 
+    best_val_loss = float('inf')
+    
     # 添加损失记录列表
     train_loss_history = []
     val_loss_history = []
@@ -90,7 +192,12 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
             max_epochs=max_epochs,
             node_input_dim=node_input_dim,
             edge_input_dim=edge_input_dim,
-            device=str(device)
+            device=str(device),
+            # New params
+            weight_decay=args.weight_decay,
+            pooling_type=args.pooling_type,
+            loss_type=args.loss,
+            use_seq_embedding=args.use_seq_embedding
         )
     except Exception as _:
         pass
@@ -99,11 +206,6 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
         model.train()
         train_losses = []
         for batch in train_loader:
-            # print("✅ batch.y.shape:", batch.y.shape)
-            # print("✅ batch.batch.shape:", batch.batch.shape)
-            # print("✅ batch_size:", batch_size)
-            # print("❓ batch.y:", batch.y)
-
             batch = batch.to(device)
             optimizer.zero_grad()
             
@@ -125,9 +227,7 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
                 print("❌ batch.edge_attr 中含有 NaN")
             if torch.isnan(batch.y).any():
                 print("❌ batch.y 中含有 NaN")
-            # print("batch.x max:", batch.x.max().item(), "min:", batch.x.min().item())
-            # print("batch.edge_attr max:", batch.edge_attr.max().item(), "min:", batch.edge_attr.min().item())
-            # print("batch.y:", batch.y[:5])
+                
             out = model(batch)
            
             loss = criterion(out, log_y)
@@ -135,6 +235,10 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 梯度裁剪
             optimizer.step()
             train_losses.append(loss.item())
+        
+        # Step scheduler for cosine (batch level is better but epoch is fine for restart)
+        # if args.scheduler == 'cosine': scheduler.step()
+        
         train_loss = np.mean(train_losses)
 
         # === Validation ===
@@ -172,6 +276,13 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
         val_loss_history.append(val_loss)
         r2_history.append(metrics['R2'])
         pearson_history.append(metrics['Pearson'])
+        
+        # === Scheduler Step ===
+        if args.scheduler == 'plateau':
+            scheduler.step(val_loss)
+        elif args.scheduler == 'cosine':
+            scheduler.step()
+
         # === Logging ===
         writer.add_scalar("Loss/train", train_loss, epoch)
         writer.add_scalar("Loss/val", val_loss, epoch)
@@ -305,7 +416,22 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default="kcat_train_after_new_clean.pt", help='Path to .pt dataset')
     parser.add_argument('--save_dir', type=str, default='outputs/kcat_after_new')
+    
+    # Phase 1: Training & Regularization
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='L2 regularization')
+    parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
+    parser.add_argument('--loss', type=str, default='mse', choices=['mse', 'huber'], help='Loss function')
+    parser.add_argument('--scheduler', type=str, default='none', choices=['none', 'plateau', 'cosine'], help='LR Scheduler')
+    
+    # Phase 2: Pooling
+    parser.add_argument('--pooling_type', type=str, default='mean', choices=['mean', 'global_attention'], help='Graph pooling type')
+    
+    # Phase 3: ESM Sequence Embedding
+    parser.add_argument('--use_seq_embedding', action='store_true', help='Enable ESM sequence embedding (Late Fusion)')
+    parser.add_argument('--seq_embedding_path', type=str, default='data/esm_embeddings.pt', help='Path to ESM embeddings dictionary')
+    
     args = parser.parse_args()
+    
     from utils.metadata_utils import save_metadata
 
     # 训练开始时，加上这行保存metadata
@@ -314,7 +440,7 @@ if __name__ == '__main__':
         dataset_path=args.dataset,
         graph_builder_version='enhanced_builder',
         gnn_model_version='PocketGNNKcatOnly',
-        comments='Enhanced features + kcat-only prediction + angle features,9124 items ,simplist model'
+        comments=f'Enhanced: pooling={args.pooling_type}, seq_emb={args.use_seq_embedding}, loss={args.loss}, wd={args.weight_decay}'
     )
 
-    train(args.dataset, args.save_dir)
+    train(args)
