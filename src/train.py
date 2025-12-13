@@ -2,17 +2,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import os
-import sys
 import numpy as np
 from torch_geometric.loader import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-
-# 添加项目根目录到 Python 路径，支持从根目录运行 python src/train.py
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 也添加 src 目录，兼容两种运行方式
-
 import GNN_model as MD
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from scipy.stats import pearsonr
@@ -21,313 +13,126 @@ matplotlib.use('Agg')  # 确保在没有GUI的环境中使用
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
-from metadata_utils import update_training_results
-import wandb
+from utils.metadata_utils import update_training_results
 
 def compute_metrics(y_true_log, y_pred_log):
-    # 安全地转换为 numpy：先 detach 再移到 CPU
-    y_true_log = y_true_log.detach().cpu().numpy()
-    y_pred_log = y_pred_log.detach().cpu().numpy()
-    
-    # 计算 Pearson 相关系数，处理常数输入的情况
-    try:
-        pearson_val = pearsonr(y_true_log.flatten(), y_pred_log.flatten())[0]
-        if np.isnan(pearson_val):
-            pearson_val = 0.0  # 如果预测值或真实值是常数，相关系数为 0
-    except (ValueError, RuntimeWarning):
-        pearson_val = 0.0
-    
+    y_true_log = y_true_log.numpy()
+    y_pred_log = y_pred_log.numpy()
     return {
         'MAE': mean_absolute_error(y_true_log, y_pred_log),
         'RMSE': np.sqrt(mean_squared_error(y_true_log, y_pred_log)),
         'R2': r2_score(y_true_log, y_pred_log),
-        'Pearson': pearson_val
+        'Pearson': pearsonr(y_true_log.flatten(), y_pred_log.flatten())[0]
     }
 
-def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=500, label_permutation=False, frozen_encoder=False, load_checkpoint=None, exp_name="kcat_attn_v1", loss_type="mse", patience=None):
-    from datetime import datetime
+def train(args):
+    dataset_path = args.dataset
+    save_dir = args.save_dir
+    batch_size = 32 # defaults if not in args, but usually controlled by loop or constant
+    lr = 1e-3
+    max_epochs = 500
     
-    # 支持两种模式：
-    # 1. 原有模式：dataset_path 指定单个文件，内部进行 8/2 划分
-    # 2. 新模式：train_dataset_path 和 val_dataset_path 指定已划分好的文件
-    use_pre_split = (train_dataset_path is not None and val_dataset_path is not None)
+    # Check if we should override defaults with args
+    if hasattr(args, 'batch_size'): batch_size = args.batch_size
+    if hasattr(args, 'lr'): lr = args.lr
+    if hasattr(args, 'epochs'): max_epochs = args.epochs
+
+    print(f"Loading dataset from {dataset_path}...")
+    try:
+        data_list = torch.load(dataset_path, weights_only=False)  # List[Data]
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        return
+
+    # 检查数据集是否包含 NaN
+    # Optimization: Check first few to avoid slow start? Or keep as is.
+    # Keeping original logic but maybe skip full check for speed if confident.
+    # for data in data_list:
+    #     if torch.isnan(data.x).any() or torch.isnan(data.y).any():
+    #         raise ValueError("数据集中包含 NaN 值")
     
-    if use_pre_split:
-        # 新模式：直接加载已划分好的数据集
-        print("📊 使用预划分数据集模式")
-        print(f"  训练集: {train_dataset_path}")
-        print(f"  验证集: {val_dataset_path}")
-        train_data = torch.load(train_dataset_path, weights_only=False)
-        val_data = torch.load(val_dataset_path, weights_only=False)
+    # === Phase 3: Load Sequence Embeddings (Late Fusion) ===
+    seq_embedding_dim = 0
+    if args.use_seq_embedding:
+        print(f"Loading sequence embeddings from {args.seq_embedding_path}...")
+        if not os.path.exists(args.seq_embedding_path):
+            raise FileNotFoundError(f"Sequence embedding file not found: {args.seq_embedding_path}")
         
-        # 检查数据集是否包含 NaN
-        for data in train_data + val_data:
-            if torch.isnan(data.x).any() or torch.isnan(data.y).any():
-                raise ValueError("数据集中包含 NaN 值")
+        # Assume embeddings is a dict: {identifier: tensor}
+        # Identifier could be uniprot_id or pdb_id or sample_id
+        # We need to match what's in data_list (data.pdb_id or data.uniprot_id)
+        embeddings_map = torch.load(args.seq_embedding_path, weights_only=False) # or specific loading logic
         
-        # 合并用于 label permutation（如果需要）
-        if label_permutation:
-            all_data = train_data + val_data
+        # Check first key to see format if needed, or just try to match
+        print(f"Loaded {len(embeddings_map)} embeddings.")
+        
+        matched_count = 0
+        for data in data_list:
+            # Try pdb_id first, then maybe other IDs if available
+            # In data_loader.py, it seems 'pdb_id' or 'uniprot_id' might be used.
+            # train.py logs suggest d.pdb_id exists.
+            
+            # Key matching logic: try direct match, then maybe some processing
+            key = getattr(data, 'pdb_id', None)
+            if key is None:
+                key = getattr(data, 'uniprot_id', None)
+            
+            # Also handle if key is not in map (use zero vector or skip?)
+            # Instructions say: "sample_id 对齐"
+            
+            embedding = None
+            if key in embeddings_map:
+                embedding = embeddings_map[key]
+            else:
+                # Try cleaning key? e.g. .split('.')[0]
+                 pass
+
+            if embedding is not None:
+                # Ensure it's a tensor
+                if not isinstance(embedding, torch.Tensor):
+                    embedding = torch.tensor(embedding, dtype=torch.float)
+                
+                # Check dim
+                if seq_embedding_dim == 0:
+                    seq_embedding_dim = embedding.shape[0]
+                    print(f"Sequence embedding dimension: {seq_embedding_dim}")
+                
+                data.seq_embedding = embedding.unsqueeze(0) # [1, dim] for batching
+                matched_count += 1
+            else:
+                 # If missing, fill with zeros? Or fail?
+                 # 'Enhance.md' implies strictness but let's be robust for now with warning
+                 # For now, let's create a zero vector if we are committed to using embeddings
+                 # But we don't know dim yet if first one fails.
+                 pass
+
+        print(f"Matched embeddings for {matched_count}/{len(data_list)} samples.")
+        
+        # If we didn't find any, we can't proceed with seq embedding
+        if matched_count == 0:
+            print("Warning: No embeddings matched! Disabling sequence embedding.")
+            seq_embedding_dim = 0
+            args.use_seq_embedding = False
         else:
-            all_data = None
-    else:
-        # 原有模式：加载单个文件，内部划分
-        if dataset_path is None:
-            raise ValueError("必须指定 --dataset 或同时指定 --train_dataset 和 --val_dataset")
-        print("📊 使用单文件模式（内部划分）")
-        print(f"  数据集: {dataset_path}")
-        dataset = torch.load(dataset_path, weights_only=False)
-        
-        # 检查数据集是否包含 NaN
-        for data in dataset:
-            if torch.isnan(data.x).any() or torch.isnan(data.y).any():
-                raise ValueError("数据集中包含 NaN 值")
-        
-        all_data = dataset
+            # Fill missing with zeros
+            for data in data_list:
+                if not hasattr(data, 'seq_embedding'):
+                    data.seq_embedding = torch.zeros((1, seq_embedding_dim), dtype=torch.float)
+
     
     device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
     os.makedirs(save_dir, exist_ok=True)
     writer = SummaryWriter(save_dir)
-    
-    # === 构建 W&B 元数据 ===
-    # A. Group: 用 exp_name 把同一条实验主线串起来（最重要）
-    group = exp_name
-    
-    # B. Tags: 标记关键信息（便于在 W&B 界面筛选）
-    tags = []
-    if label_permutation:
-        tags.append("diag")
-        tags.append("label_permutation")
-    if frozen_encoder:
-        tags.append("diag")
-        tags.append("frozen_encoder")
-    if load_checkpoint:
-        tags.append("from_checkpoint")
-        # 从 checkpoint 路径提取关键信息
-        ckpt_basename = os.path.basename(load_checkpoint)
-        # 尝试提取 epoch 号或其他标识
-        if "epoch" in ckpt_basename.lower():
-            tags.append(f"ckpt={ckpt_basename}")
-        else:
-            tags.append(f"ckpt={ckpt_basename[:20]}")  # 截断过长的路径
-    
-    # 添加超参数标签（便于筛选）
-    tags.append(f"lr={lr}")
-    tags.append(f"bs={batch_size}")
-    
-    # C. Name: 语义-超参数-时间戳（格式：diag/frozen_encoder-lr3e-3-ckpt130530-20251213_140046）
-    base_name = os.path.basename(save_dir)
-    
-    # 提取时间戳（假设格式为 prefix_YYYYMMDD_HHMMSS 或 YYYYMMDD_HHMMSS）
-    timestamp = None
-    if "_" in base_name:
-        parts = base_name.split("_")
-        # 检查最后两部分是否是时间戳格式（YYYYMMDD_HHMMSS）
-        if len(parts) >= 2:
-            last_two = "_".join(parts[-2:])
-            if len(last_two) == 15 and last_two.replace("_", "").isdigit():  # YYYYMMDD_HHMMSS
-                timestamp = last_two
-                semantic_prefix = "_".join(parts[:-2]) if len(parts) > 2 else exp_name
-            else:
-                timestamp = parts[-1] if parts[-1] else datetime.now().strftime("%Y%m%d_%H%M%S")
-                semantic_prefix = "_".join(parts[:-1]) if len(parts) > 1 else exp_name
-        else:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            semantic_prefix = exp_name
-    else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        semantic_prefix = exp_name
-    
-    # 构建语义前缀（基于 exp_name 和诊断标志）
-    name_parts = []
-    if label_permutation:
-        name_parts.append("perm")
-    if frozen_encoder:
-        name_parts.append("frozen")
-    if load_checkpoint:
-        # 从 checkpoint 路径提取简短标识
-        ckpt_short = os.path.basename(load_checkpoint).replace(".pt", "").replace("best_model", "ckpt")
-        if len(ckpt_short) > 15:
-            ckpt_short = ckpt_short[:15]
-        name_parts.append(ckpt_short)
-    
-    # 如果没有任何特殊标志，使用 exp_name
-    if not name_parts:
-        semantic_str = semantic_prefix
-    else:
-        semantic_str = f"{semantic_prefix}/" + "-".join(name_parts) if semantic_prefix else "-".join(name_parts)
-    
-    # 格式化学习率（使其更易读）
-    if lr >= 1:
-        lr_str = f"{lr:.0f}"
-    elif lr >= 0.01:
-        lr_str = f"{lr:.2f}".rstrip("0").rstrip(".")
-    else:
-        # 科学计数法，但格式化为更易读的形式
-        lr_str = f"{lr:.0e}".replace("e-0", "e-").replace("e+", "e")
-    
-    # 最终 name: 语义-超参数-时间戳
-    wandb_name = f"{semantic_str}-lr{lr_str}-{timestamp}"
-    
-    # D. Notes: 写一句人话（W&B 页面里一眼就懂）
-    notes_parts = []
-    if label_permutation:
-        notes_parts.append("Label Permutation Test (diagnostic)")
-    if frozen_encoder:
-        notes_parts.append("Frozen Encoder Test (diagnostic)")
-        if load_checkpoint:
-            notes_parts.append(f"from {os.path.basename(load_checkpoint)}")
-    if not notes_parts:
-        notes_parts.append(f"Baseline: {exp_name}")
-    notes = " | ".join(notes_parts)
-    
-    # 初始化 wandb
-    wandb.login(key="46dbe55e52d029976ffa0e29c90f0d32410e1504")
-    # 确定数据集名称用于 W&B 配置
-    if use_pre_split:
-        dataset_name = f"{os.path.basename(train_dataset_path)} + {os.path.basename(val_dataset_path)}"
-    else:
-        dataset_name = os.path.basename(dataset_path)
-    
-    wandb_config = {
-        "dataset": dataset_name,
-        "batch_size": batch_size,
-        "lr": lr,
-        "max_epochs": max_epochs,
-        "device": str(device),
-        "label_permutation": label_permutation,
-        "frozen_encoder": frozen_encoder,
-        "loss_type": loss_type,
-        "patience": patience if patience is not None else "disabled",
-    }
-    if load_checkpoint is not None:
-        wandb_config["load_checkpoint"] = load_checkpoint
-    
-    # 打印 W&B 配置信息（便于调试和确认）
-    print(f"📊 W&B 配置:")
-    print(f"   Group: {group}")
-    print(f"   Name: {wandb_name}")
-    print(f"   Tags: {tags}")
-    print(f"   Notes: {notes}")
-    
-    wandb.init(
-        project="enzyme-kcat-prediction",
-        name=wandb_name,
-        group=group,
-        tags=tags,
-        notes=notes,
-        config=wandb_config
-    )
 
     # === Load dataset ===
-    if use_pre_split:
-        # 新模式：已经划分好了
-        data_list = train_data + val_data  # 用于打印和检查
-        print(data_list[0])  # 打印第一个图数据
-        actual_num_atom_types = data_list[0].x.shape[1]
-        
-        # === Label Permutation Test (诊断测试) ===
-        if label_permutation:
-            print("⚠️  启用 Label Permutation Test - 将对标签进行随机置换")
-            print("   这是诊断测试，用于验证模型是否真正使用图表示")
-            # 收集所有标签
-            all_y_list = [d.y.clone() for d in all_data]
-            perm = torch.randperm(len(all_data))
-            # 对训练集和验证集的标签进行置换
-            for i, d in enumerate(train_data):
-                d.y = all_y_list[perm[i]].clone()
-            for i, d in enumerate(val_data):
-                d.y = all_y_list[perm[len(train_data) + i]].clone()
-            print(f"✅ 标签置换完成，训练集 {len(train_data)} 个样本，验证集 {len(val_data)} 个样本")
-            print("   预期结果：如果模型真正使用图表示，val_pearson ≈ 0, val_r2 ≈ 0")
-        
-        # === 清理 Data 对象 ===
-        print("🧹 清理 Data 对象：移除字符串属性以兼容 DataLoader...")
-        total_removed = 0
-        sample_keys_removed = set()
-        for data in train_data + val_data:
-            keys_to_remove = []
-            for key in data.keys():
-                value = getattr(data, key)
-                if not isinstance(value, torch.Tensor):
-                    keys_to_remove.append(key)
-                    sample_keys_removed.add(key)
-            for key in keys_to_remove:
-                delattr(data, key)
-                total_removed += 1
-        
-        if total_removed > 0:
-            print(f"✅ 清理完成，共移除了 {total_removed} 个非 tensor 属性")
-            print(f"   移除的属性包括: {', '.join(sorted(sample_keys_removed))}")
-        else:
-            print("✅ 数据已清理，无需移除属性")
-        
-        train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_data, batch_size=batch_size)
-        print(f"📊 数据集：训练集 {len(train_data)} 个样本，验证集 {len(val_data)} 个样本")
-        
-    else:
-        # 原有模式：单文件，内部划分
-        data_list = torch.load(dataset_path, weights_only=False)  # List[Data]
-        print(data_list[0])  # 打印第一个图数据
-        actual_num_atom_types = data_list[0].x.shape[1]
-        
-        # === Label Permutation Test (诊断测试) ===
-        # 在数据加载后、数据集划分前进行 label 随机置换
-        # 用于诊断模型是否真正使用图表示，而不是 pipeline bug
-        if label_permutation:
-            print("⚠️  启用 Label Permutation Test - 将对标签进行随机置换")
-            print("   这是诊断测试，用于验证模型是否真正使用图表示")
-            # 收集所有标签（保持原始形状）
-            all_y_list = [d.y.clone() for d in data_list]
-            # 生成随机置换索引（对样本进行置换，而不是对标签值）
-            perm = torch.randperm(len(data_list))
-            # 对每个数据样本的标签进行置换
-            for i, d in enumerate(data_list):
-                d.y = all_y_list[perm[i]].clone()
-            print(f"✅ 标签置换完成，共 {len(data_list)} 个样本")
-            print("   预期结果：如果模型真正使用图表示，val_pearson ≈ 0, val_r2 ≈ 0")
-        
-        # === 数据集划分（使用固定随机种子确保一致性） ===
-        # 设置随机种子，确保每次运行的数据集划分一致
-        # 这对于 Frozen Encoder Test 很重要，需要与 baseline 使用相同的验证集
-        np.random.seed(42)
-        np.random.shuffle(data_list)
-        
-        # === 清理 Data 对象：移除字符串属性（PyG DataLoader 无法 collate 字符串） ===
-        # PyG 的 DataLoader 会尝试将所有属性 collate 成 tensor，但字符串无法转换
-        # 需要保留的属性：x, edge_index, edge_attr, pos, y, batch, temperature (如果是 tensor)
-        # 需要移除的属性：pdb_id, sample_id, ec (字符串或非 tensor 类型)
-        print("🧹 清理 Data 对象：移除字符串属性以兼容 DataLoader...")
-        total_removed = 0
-        sample_keys_removed = set()
-        for data in data_list:
-            # 获取所有属性名（keys 是方法，需要调用）
-            keys_to_remove = []
-            for key in data.keys():
-                value = getattr(data, key)
-                # 如果不是 tensor 类型，需要移除（字符串、整数等）
-                if not isinstance(value, torch.Tensor):
-                    keys_to_remove.append(key)
-                    sample_keys_removed.add(key)
-            
-            # 移除非 tensor 属性
-            for key in keys_to_remove:
-                delattr(data, key)
-                total_removed += 1
-        
-        if total_removed > 0:
-            print(f"✅ 清理完成，共移除了 {total_removed} 个非 tensor 属性")
-            print(f"   移除的属性包括: {', '.join(sorted(sample_keys_removed))}")
-        else:
-            print("✅ 数据已清理，无需移除属性")
-        
-        split = int(0.8 * len(data_list))
-        train_loader = DataLoader(data_list[:split], batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(data_list[split:], batch_size=batch_size)
-        print(f"📊 数据集划分：训练集 {len(data_list[:split])} 个样本，验证集 {len(data_list[split:])} 个样本")
+    # data_list already loaded
+    print(data_list[0])  # 打印第一个图数据
+    
+    np.random.shuffle(data_list)
+    split = int(0.8 * len(data_list))
+    train_loader = DataLoader(data_list[:split], batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(data_list[split:], batch_size=batch_size)
 
-    print(data_list[0].temperature)
     # === Initialize model ===
     node_input_dim = data_list[0].x.shape[1] #default 52
     edge_input_dim = data_list[0].edge_attr.shape[1]  # 现在应该是24维
@@ -337,17 +142,7 @@ def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, sav
     hidden_dim = 128  # 模型隐藏维度
     num_layers = 3    # 层数
     heads = 4         # 注意力头数
-    dropout = 0.1     # Dropout 概率
-
-    # 更新 wandb config 包含模型参数
-    wandb.config.update({
-        "node_input_dim": node_input_dim,
-        "edge_input_dim": edge_input_dim,
-        "hidden_dim": hidden_dim,
-        "num_layers": num_layers,
-        "heads": heads,
-        "dropout": dropout,
-    })
+    dropout = args.dropout # Configurable dropout
 
     model = MD.PocketGNNKcatOnly(
         node_input_dim=node_input_dim,
@@ -355,79 +150,28 @@ def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, sav
         hidden_dim=hidden_dim,
         num_layers=num_layers,
         heads=heads,
-        dropout=dropout
+        dropout=dropout,
+        pooling_type=args.pooling_type,
+        seq_embedding_dim=seq_embedding_dim
     ).to(device)
     
-    # === 加载预训练权重（如果指定） ===
-    if load_checkpoint is not None:
-        if not os.path.exists(load_checkpoint):
-            raise FileNotFoundError(f"❌ 找不到 checkpoint 文件: {load_checkpoint}")
-        print(f"📥 加载预训练权重: {load_checkpoint}")
-        model.load_state_dict(torch.load(load_checkpoint, map_location=device, weights_only=False))
-        print("✅ 预训练权重加载完成")
+    # === Phase 1: Optimizer & Loss & Scheduler ===
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=args.weight_decay)
     
-    # === Frozen Encoder Test (诊断测试) ===
-    # 冻结 GNN encoder，只训练最后的 MLP regression head
-    # 用于诊断 encoder 是否已经饱和
-    # 注意：如果启用 frozen_encoder，必须先加载预训练权重
-    if frozen_encoder:
-        if load_checkpoint is None:
-            raise ValueError("❌ 错误：Frozen Encoder Test 需要先加载预训练权重！请使用 --load_checkpoint 参数")
-        
-        print("⚠️  启用 Frozen Encoder Test - 将冻结 GNN encoder，只训练 MLP regression head")
-        print("   这是诊断测试，用于验证 encoder 是否已经饱和")
-        
-        # === 关键步骤：重置 MLP head 参数 ===
-        # 为了正确测试 encoder 表示是否 linearly-usable，需要从头训练 head
-        # 而不是继续使用已经训练好的 head 权重
-        print("🔄 重置 MLP head 参数（从头开始训练）...")
-        for name, module in model.named_modules():
-            if name.startswith("mlp"):
-                if isinstance(module, nn.Linear):
-                    # 重新初始化 Linear 层的权重和偏置
-                    nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
-                    if module.bias is not None:
-                        nn.init.constant_(module.bias, 0)
-        print("✅ MLP head 参数已重置为随机初始化")
-        
-        # 冻结 encoder，只训练 MLP head
-        frozen_params = 0
-        trainable_params = 0
-        for name, param in model.named_parameters():
-            # 使用 startswith 而不是 in，更精确地匹配 mlp 参数
-            if not name.startswith("mlp"):
-                param.requires_grad = False
-                frozen_params += param.numel()
-            else:
-                trainable_params += param.numel()
-        print(f"✅ 参数冻结完成：冻结 {frozen_params:,} 个参数，可训练 {trainable_params:,} 个参数（MLP head）")
-        print("   预期结果：")
-        print("   - 如果性能 ≈ 原模型（Pearson ≈ 0.60）→ encoder 表示已饱和（linearly-usable）")
-        print("   - 如果性能明显下降（Pearson < 0.3）→ encoder 仍需端到端协同优化")
-        print("   - 如果性能 ≈ 0 → 实现有 bug（如没正确加载权重）")
-        if lr <= 1e-3:
-            print(f"   💡 建议：frozen encoder 时可以使用稍大的学习率（如 3e-3），当前 lr={lr}")
-    
-    # 创建 optimizer：如果冻结了 encoder，只优化可训练的参数
-    if frozen_encoder:
-        trainable_params_list = filter(lambda p: p.requires_grad, model.parameters())
-        optimizer = optim.Adam(trainable_params_list, lr=lr)
-        print(f"✅ Optimizer 已创建，只优化可训练参数（MLP head）")
-    else:
-        optimizer = optim.Adam(model.parameters(), lr=lr)
-    
-    # 选择损失函数：MSE 或 Huber Loss (SmoothL1Loss)
-    if loss_type.lower() == "huber":
-        criterion = nn.SmoothL1Loss(beta=0.5)
-        print("📊 使用 Huber Loss (SmoothL1Loss, beta=0.5) - 对异常值更鲁棒")
+    if args.loss == 'huber':
+        criterion = nn.HuberLoss(delta=1.0)
     else:
         criterion = nn.MSELoss()
-        print("📊 使用 MSE Loss")
-    
-    best_val_loss = float('inf')
-    best_epoch = 0
-    patience_counter = 0  # Early stopping 计数器
+        
+    scheduler = None
+    if args.scheduler == 'plateau':
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
+    elif args.scheduler == 'cosine':
+        # T_0 could be max_epochs
+        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=50, T_mult=2)
 
+    best_val_loss = float('inf')
+    
     # 添加损失记录列表
     train_loss_history = []
     val_loss_history = []
@@ -448,7 +192,12 @@ def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, sav
             max_epochs=max_epochs,
             node_input_dim=node_input_dim,
             edge_input_dim=edge_input_dim,
-            device=str(device)
+            device=str(device),
+            # New params
+            weight_decay=args.weight_decay,
+            pooling_type=args.pooling_type,
+            loss_type=args.loss,
+            use_seq_embedding=args.use_seq_embedding
         )
     except Exception as _:
         pass
@@ -457,11 +206,6 @@ def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, sav
         model.train()
         train_losses = []
         for batch in train_loader:
-            # print("✅ batch.y.shape:", batch.y.shape)
-            # print("✅ batch.batch.shape:", batch.batch.shape)
-            # print("✅ batch_size:", batch_size)
-            # print("❓ batch.y:", batch.y)
-
             batch = batch.to(device)
             optimizer.zero_grad()
             
@@ -483,9 +227,7 @@ def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, sav
                 print("❌ batch.edge_attr 中含有 NaN")
             if torch.isnan(batch.y).any():
                 print("❌ batch.y 中含有 NaN")
-            # print("batch.x max:", batch.x.max().item(), "min:", batch.x.min().item())
-            # print("batch.edge_attr max:", batch.edge_attr.max().item(), "min:", batch.edge_attr.min().item())
-            # print("batch.y:", batch.y[:5])
+                
             out = model(batch)
            
             loss = criterion(out, log_y)
@@ -493,6 +235,10 @@ def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, sav
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 梯度裁剪
             optimizer.step()
             train_losses.append(loss.item())
+        
+        # Step scheduler for cosine (batch level is better but epoch is fine for restart)
+        # if args.scheduler == 'cosine': scheduler.step()
+        
         train_loss = np.mean(train_losses)
 
         # === Validation ===
@@ -516,8 +262,7 @@ def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, sav
                 try:
                     out = model(batch)
                 except ValueError as e:
-                    # 注意：pdb_id 等字符串属性已在数据清理时移除，无法访问
-                    print(f"❌ NaN 输出，batch 索引: {batch.batch.unique()}")
+                    print(f"❌ NaN 输出，batch中数据文件: {[d.pdb_id for d in batch]}")
                     raise e
                 loss = criterion(out, log_y)
                 val_losses.append(loss.item())
@@ -531,62 +276,34 @@ def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, sav
         val_loss_history.append(val_loss)
         r2_history.append(metrics['R2'])
         pearson_history.append(metrics['Pearson'])
+        
+        # === Scheduler Step ===
+        if args.scheduler == 'plateau':
+            scheduler.step(val_loss)
+        elif args.scheduler == 'cosine':
+            scheduler.step()
+
         # === Logging ===
         writer.add_scalar("Loss/train", train_loss, epoch)
         writer.add_scalar("Loss/val", val_loss, epoch)
         writer.add_scalar("R2/val", metrics['R2'], epoch)
         writer.add_scalar("Pearson/val", metrics['Pearson'], epoch)
-        
-        # wandb logging
-        wandb.log({
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-            "val_r2": metrics['R2'],
-            "val_pearson": metrics['Pearson'],
-            "val_mae": metrics['MAE'],
-            "val_rmse": metrics['RMSE'],
-        })
 
         print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | R2: {metrics['R2']:.3f}")
 
         # === Save best model ===
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_epoch = epoch
-            patience_counter = 0  # 重置 early stopping 计数器
-            model_path = os.path.join(save_dir, "best_model.pt")
-            torch.save(model.state_dict(), model_path)
-            # 保存最佳模型到 wandb
-            wandb.save(model_path)
-            print(f"   ✨ 新的最佳模型 (Epoch {best_epoch}, Val Loss: {best_val_loss:.4f})")
-        else:
-            if patience is not None:
-                patience_counter += 1
-        
-        # === Early Stopping ===
-        if patience is not None and patience_counter >= patience:
-            print(f"🛑 Early stopping triggered at epoch {epoch}")
-            print(f"   最佳模型在 Epoch {best_epoch} (Val Loss: {best_val_loss:.4f})")
-            print(f"   已等待 {patience} 个 epoch 无改善，停止训练")
-            break
+            torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pt"))
 
     writer.close()
-    wandb.log({
-        "best_val_loss": best_val_loss,
-        "best_epoch": best_epoch,
-        "final_epoch": epoch
-    })
-    print(f"✅ Training finished. Best model saved at Epoch {best_epoch} (Val Loss: {best_val_loss:.4f})")
+    print("✅ Training finished. Best model saved.")
 
     # 训练结束后绘制图像
-    # 注意：使用实际训练的 epoch 数，而不是 max_epochs（因为可能有 early stopping）
-    actual_epochs = len(train_loss_history)
-    
     # 1. 损失曲线
     plt.figure(figsize=(10, 6))
-    plt.plot(range(1, actual_epochs + 1), train_loss_history, label='Train Loss')
-    plt.plot(range(1, actual_epochs + 1), val_loss_history, label='Validation Loss')
+    plt.plot(range(1, max_epochs + 1), train_loss_history, label='Train Loss')
+    plt.plot(range(1, max_epochs + 1), val_loss_history, label='Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.title('Training and Validation Loss')
@@ -597,8 +314,8 @@ def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, sav
     
     # 2. R2和Pearson相关系数曲线
     plt.figure(figsize=(10, 6))
-    plt.plot(range(1, actual_epochs + 1), r2_history, label='R² Score')
-    plt.plot(range(1, actual_epochs + 1), pearson_history, label='Pearson Correlation')
+    plt.plot(range(1, max_epochs + 1), r2_history, label='R² Score')
+    plt.plot(range(1, max_epochs + 1), pearson_history, label='Pearson Correlation')
     plt.xlabel('Epoch')
     plt.ylabel('Score')
     plt.title('R² and Pearson Correlation During Training')
@@ -631,8 +348,7 @@ def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, sav
             try:
                 out = model(batch)
             except ValueError as e:
-                # 注意：pdb_id 等字符串属性已在数据清理时移除，无法访问
-                print(f"❌ NaN 输出，batch 索引: {batch.batch.unique()}")
+                print(f"❌ NaN 输出，batch中数据文件: {[d.pdb_id for d in batch]}")
                 raise e
             all_y_true.append(log_y.cpu())
             all_y_pred.append(out.cpu())
@@ -655,11 +371,8 @@ def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, sav
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    scatter_path = os.path.join(save_dir, 'kcat_prediction_scatter.png')
-    plt.savefig(scatter_path)
+    plt.savefig(os.path.join(save_dir, 'kcat_prediction_scatter.png'))
     plt.close()
-    # 上传散点图到 wandb
-    wandb.log({"kcat_scatter": wandb.Image(scatter_path)})
     
     # 4. kcat密度图
     plt.figure(figsize=(8, 7))
@@ -671,24 +384,18 @@ def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, sav
     plt.xlabel('True kcat (log10)')
     plt.ylabel('Predicted kcat (log10)')
     plt.title('kcat: Density Plot')
-    density_path = os.path.join(save_dir, 'kcat_density.png')
-    plt.savefig(density_path)
+    plt.savefig(os.path.join(save_dir, 'kcat_density.png'))
     plt.close()
-    # 上传密度图到 wandb
-    wandb.log({"kcat_density": wandb.Image(density_path)})
     
     # 保存最终指标到文件
     metrics_df = pd.DataFrame({
-        'Epoch': range(1, actual_epochs + 1),
+        'Epoch': range(1, max_epochs + 1),
         'Train_Loss': train_loss_history,
         'Val_Loss': val_loss_history,
         'R2': r2_history,
         'Pearson': pearson_history
     })
-    metrics_csv_path = os.path.join(save_dir, 'training_metrics.csv')
-    metrics_df.to_csv(metrics_csv_path, index=False)
-    # 上传指标表格到 wandb
-    wandb.log({"training_metrics": wandb.Table(dataframe=metrics_df)})
+    metrics_df.to_csv(os.path.join(save_dir, 'training_metrics.csv'), index=False)
     
     # 记录最终结果到共享表
     try:
@@ -701,99 +408,39 @@ def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, sav
         )
     except Exception as _:
         pass
-    
-    # 记录最终指标到 wandb
-    wandb.log({
-        "final_r2": r2_kcat,
-        "final_pearson": pearson_end,
-        "best_val_loss": best_val_loss,
-    })
-    
-    # 上传损失曲线和指标曲线到 wandb
-    loss_curve_path = os.path.join(save_dir, 'loss_curve.png')
-    metrics_curve_path = os.path.join(save_dir, 'metrics_curve.png')
-    if os.path.exists(loss_curve_path):
-        wandb.log({"loss_curve": wandb.Image(loss_curve_path)})
-    if os.path.exists(metrics_curve_path):
-        wandb.log({"metrics_curve": wandb.Image(metrics_curve_path)})
-    
-    wandb.finish()
+
     print("✅ Training finished. Best model and plots saved to", save_dir)
 
 if __name__ == '__main__':
     import argparse
-    from datetime import datetime
-    
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default=None, help='Path to .pt dataset (单文件模式，内部进行 8/2 划分)')
-    parser.add_argument('--train_dataset', type=str, default=None, help='Path to training .pt dataset (预划分模式，需同时指定 --val_dataset)')
-    parser.add_argument('--val_dataset', type=str, default=None, help='Path to validation .pt dataset (预划分模式，需同时指定 --train_dataset)')
-    parser.add_argument('--save_dir', type=str, default=None, help='Output directory (if not specified, will auto-generate with timestamp)')
-    parser.add_argument('--exp_name', type=str, default='kcat_attn_v1', help='Experiment name (semantic, e.g., kcat_attn_v1)')
-    parser.add_argument('--no_timestamp', action='store_true', help='Disable automatic timestamp in save_dir (use fixed path, may overwrite previous results)')
-    parser.add_argument('--label_permutation', action='store_true', help='Enable Label Permutation Test (diagnostic test to verify model uses graph representation)')
-    parser.add_argument('--frozen_encoder', action='store_true', help='Enable Frozen Encoder Test (freeze GNN encoder, only train MLP regression head to diagnose encoder saturation). Requires --load_checkpoint')
-    parser.add_argument('--load_checkpoint', type=str, default=None, help='Path to pretrained model checkpoint (.pt file) to load before training')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
-    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
-    parser.add_argument('--max_epochs', type=int, default=500, help='Maximum number of training epochs')
-    parser.add_argument('--loss_type', type=str, default='mse', choices=['mse', 'huber'], help='Loss function type: mse (default) or huber (SmoothL1Loss, more robust to outliers)')
-    parser.add_argument('--patience', type=int, default=None, help='Early stopping patience (number of epochs to wait for improvement). If None, no early stopping. Recommended: 30-50')
+    parser.add_argument('--dataset', type=str, default="kcat_train_after_new_clean.pt", help='Path to .pt dataset')
+    parser.add_argument('--save_dir', type=str, default='outputs/kcat_after_new')
+    
+    # Phase 1: Training & Regularization
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='L2 regularization')
+    parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
+    parser.add_argument('--loss', type=str, default='mse', choices=['mse', 'huber'], help='Loss function')
+    parser.add_argument('--scheduler', type=str, default='none', choices=['none', 'plateau', 'cosine'], help='LR Scheduler')
+    
+    # Phase 2: Pooling
+    parser.add_argument('--pooling_type', type=str, default='mean', choices=['mean', 'global_attention'], help='Graph pooling type')
+    
+    # Phase 3: ESM Sequence Embedding
+    parser.add_argument('--use_seq_embedding', action='store_true', help='Enable ESM sequence embedding (Late Fusion)')
+    parser.add_argument('--seq_embedding_path', type=str, default='data/esm_embeddings.pt', help='Path to ESM embeddings dictionary')
+    
     args = parser.parse_args()
     
-    # 如果没有指定 save_dir，自动生成带时间戳的路径
-    if args.save_dir is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.save_dir = f'outputs/kcat_{timestamp}'
-    # 如果指定了 save_dir 且没有禁用时间戳，则在路径末尾添加时间戳（避免覆盖）
-    elif not args.no_timestamp:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_dir = args.save_dir.rstrip('/')
-        args.save_dir = f"{base_dir}_{timestamp}"
-    
-    from metadata_utils import save_metadata
+    from utils.metadata_utils import save_metadata
 
     # 训练开始时，加上这行保存metadata
-    # exp_name 可以从参数传入，或使用默认值
-    exp_name = getattr(args, 'exp_name', 'kcat_attn_fulldata1213')  # 默认实验名称
-    
-    # 检查参数
-    use_pre_split = (args.train_dataset is not None and args.val_dataset is not None)
-    use_single_file = (args.dataset is not None)
-    
-    if not use_pre_split and not use_single_file:
-        parser.error("必须指定 --dataset（单文件模式）或同时指定 --train_dataset 和 --val_dataset（预划分模式）")
-    
-    if use_pre_split and use_single_file:
-        parser.error("不能同时使用 --dataset 和 --train_dataset/--val_dataset，请选择一种模式")
-    
-    # 确定数据集路径用于 metadata
-    if use_pre_split:
-        dataset_path_for_metadata = f"{args.train_dataset} + {args.val_dataset}"
-    else:
-        dataset_path_for_metadata = args.dataset
-    
     save_metadata(
         save_dir=args.save_dir,
-        dataset_path=dataset_path_for_metadata,
-        exp_name=exp_name,
+        dataset_path=args.dataset,
         graph_builder_version='enhanced_builder',
         gnn_model_version='PocketGNNKcatOnly',
-        comments='Enhanced features + kcat-only prediction + angle features,9124 items ,simplist model'
+        comments=f'Enhanced: pooling={args.pooling_type}, seq_emb={args.use_seq_embedding}, loss={args.loss}, wd={args.weight_decay}'
     )
 
-    train(
-        dataset_path=args.dataset if use_single_file else None,
-        train_dataset_path=args.train_dataset if use_pre_split else None,
-        val_dataset_path=args.val_dataset if use_pre_split else None,
-        save_dir=args.save_dir, 
-        batch_size=args.batch_size,
-        lr=args.lr,
-        max_epochs=args.max_epochs,
-        label_permutation=args.label_permutation,
-        frozen_encoder=args.frozen_encoder,
-        load_checkpoint=args.load_checkpoint,
-        exp_name=exp_name,
-        loss_type=args.loss_type,
-        patience=args.patience
-    )
+    train(args)

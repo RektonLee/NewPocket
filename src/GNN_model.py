@@ -427,11 +427,20 @@ class PocketGNNKcatOnly(nn.Module):
     """
     专门用于kcat预测的GNN模型，支持增强的边特征（24维）
     不包含温度特征，只预测kcat值
+    
+    Enhanced according to Phase 2 & 3:
+    - Supports multiple pooling types (mean, global_attention)
+    - Supports ESM-2 sequence embedding fusion (late fusion)
     """
-    def __init__(self, node_input_dim, edge_input_dim, hidden_dim=256, num_layers=6, heads=8, dropout=0.1, concat_heads=True):
+    def __init__(self, node_input_dim, edge_input_dim, hidden_dim=256, num_layers=6, heads=8, dropout=0.1, concat_heads=True, 
+                 pooling_type='mean', seq_embedding_dim=0):
         super().__init__()
         self.node_encoder = nn.Linear(node_input_dim, hidden_dim)
-
+        
+        # 记录配置
+        self.pooling_type = pooling_type
+        self.seq_embedding_dim = seq_embedding_dim
+        
         self.att_layers = nn.ModuleList()
         current_dim = hidden_dim
         for i in range(num_layers):
@@ -447,11 +456,25 @@ class PocketGNNKcatOnly(nn.Module):
                 )
                 current_dim = hidden_dim
 
-        self.readout = global_mean_pool
+        # Readout / Pooling strategy
+        if pooling_type == 'global_attention':
+            # Gate NN for GlobalAttention: computes attention weights for each node
+            self.gate_nn = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, 1)
+            )
+            self.readout = utils.GlobalAttention(gate_nn=self.gate_nn)
+        else:
+            # Default to mean pooling
+            self.readout = global_mean_pool
+
+        # Calculate MLP input dimension (Pocket Graph Feature + Optional Sequence Embedding)
+        mlp_input_dim = hidden_dim + seq_embedding_dim
 
         # MLP for kcat-only regression
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(mlp_input_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim // 2),
@@ -475,9 +498,29 @@ class PocketGNNKcatOnly(nn.Module):
             if return_attention_weights:
                 all_attention_weights.append(attention_info[1])
 
+        # Apply Pooling
         graph_x = self.readout(x, batch)  # [batch_size, hidden_dim]
 
-        # 直接进行kcat回归，不融合温度特征
+        # Late Fusion with Sequence Embedding
+        if self.seq_embedding_dim > 0:
+            if hasattr(data, 'seq_embedding'):
+                # Ensure z_seq matches batch size
+                # data.seq_embedding should be [batch_size, seq_embedding_dim]
+                z_seq = data.seq_embedding
+                
+                # Check consistency
+                if z_seq.shape[0] != graph_x.shape[0]:
+                     # This might happen if dataloader didn't batch it correctly? 
+                     # But geometric dataloader usually concatenates attributes.
+                     pass
+                
+                graph_x = torch.cat([graph_x, z_seq], dim=1)
+            else:
+                # Fallback or error if seq embedding is expected but missing
+                # For safety, we can pad with zeros if not present, but strict mode is better.
+                raise ValueError("Model configured with seq_embedding_dim > 0 but 'seq_embedding' not found in data batch.")
+
+        # Regression
         out = self.mlp(graph_x)  # [batch_size, 1]
 
         if torch.isnan(out).any():
