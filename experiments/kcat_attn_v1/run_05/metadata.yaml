@@ -1,0 +1,21 @@
+batch_size: 32
+dataset_path: data/processed/kcat_full.pt
+device: cuda:1
+edge_input_dim: 24
+exp_name: kcat_attn_v1
+git_commit: 6d65366
+graph_builder_version: enhanced_builder
+lr: 0.003
+max_epochs: 500
+model_dropout: 0.1
+model_heads: 4
+model_hidden_dim: 128
+model_num_layers: 3
+model_version: PocketGNNKcatOnly
+node_input_dim: 52
+note: Enhanced features + kcat-only prediction + angle features,9124 items ,simplist
+  model
+run_id: run_05
+save_dir: outputs/kcat_20251213_134627
+start_time: '2025-12-13T13:46:27.647476'
+status: running

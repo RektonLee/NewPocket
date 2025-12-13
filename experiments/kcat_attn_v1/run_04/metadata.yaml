@@ -15,21 +15,21 @@ best_val_loss: !!python/object/apply:numpy.core.multiarray.scalar
   - -1
   - 0
 - !!binary |
-  qBGWa3uL5D8=
+  yz2NeHSbAkA=
 dataset_path: data/processed/kcat_full.pt
 device: cuda:1
 edge_input_dim: 24
-end_time: '2025-12-13T13:30:08.916527'
+end_time: '2025-12-13T13:38:29.719641'
 exp_name: kcat_attn_v1
 final_pearson: !!python/object/apply:numpy.core.multiarray.scalar
 - *id001
 - !!binary |
-  Igrzys0L5D8=
-final_r2: 0.3744978904724121
-git_commit: 5f02e8c
+  ObstGHmwqb8=
+final_r2: -0.0017360448837280273
+git_commit: 6d65366
 graph_builder_version: enhanced_builder
 lr: 0.001
-max_epochs: 300
+max_epochs: 50
 model_dropout: 0.1
 model_heads: 4
 model_hidden_dim: 128
@@ -38,7 +38,7 @@ model_version: PocketGNNKcatOnly
 node_input_dim: 52
 note: Enhanced features + kcat-only prediction + angle features,9124 items ,simplist
   model
-run_id: run_02
-save_dir: outputs/kcat_20251213_130530
-start_time: '2025-12-13T13:05:30.678536'
+run_id: run_04
+save_dir: outputs/kcat_20251213_133411
+start_time: '2025-12-13T13:34:11.545909'
 status: completed
