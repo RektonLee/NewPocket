@@ -27,14 +27,24 @@ import wandb
 def compute_metrics(y_true_log, y_pred_log):
     y_true_log = y_true_log.numpy()
     y_pred_log = y_pred_log.numpy()
+    
+    # 计算 Pearson 相关系数，处理常数输入的情况
+    try:
+        pearson_val = pearsonr(y_true_log.flatten(), y_pred_log.flatten())[0]
+        if np.isnan(pearson_val):
+            pearson_val = 0.0  # 如果预测值或真实值是常数，相关系数为 0
+    except (ValueError, RuntimeWarning):
+        pearson_val = 0.0
+    
     return {
         'MAE': mean_absolute_error(y_true_log, y_pred_log),
         'RMSE': np.sqrt(mean_squared_error(y_true_log, y_pred_log)),
         'R2': r2_score(y_true_log, y_pred_log),
-        'Pearson': pearsonr(y_true_log.flatten(), y_pred_log.flatten())[0]
+        'Pearson': pearson_val
     }
 
-def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=500):
+def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=500, label_permutation=False, frozen_encoder=False, load_checkpoint=None, exp_name="kcat_attn_v1"):
+    from datetime import datetime
     dataset = torch.load(dataset_path, weights_only=False)
     
     # 检查数据集是否包含 NaN
@@ -46,28 +56,158 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     os.makedirs(save_dir, exist_ok=True)
     writer = SummaryWriter(save_dir)
     
+    # === 构建 W&B 元数据 ===
+    # A. Group: 用 exp_name 把同一条实验主线串起来（最重要）
+    group = exp_name
+    
+    # B. Tags: 标记关键信息（便于在 W&B 界面筛选）
+    tags = []
+    if label_permutation:
+        tags.append("diag")
+        tags.append("label_permutation")
+    if frozen_encoder:
+        tags.append("diag")
+        tags.append("frozen_encoder")
+    if load_checkpoint:
+        tags.append("from_checkpoint")
+        # 从 checkpoint 路径提取关键信息
+        ckpt_basename = os.path.basename(load_checkpoint)
+        # 尝试提取 epoch 号或其他标识
+        if "epoch" in ckpt_basename.lower():
+            tags.append(f"ckpt={ckpt_basename}")
+        else:
+            tags.append(f"ckpt={ckpt_basename[:20]}")  # 截断过长的路径
+    
+    # 添加超参数标签（便于筛选）
+    tags.append(f"lr={lr}")
+    tags.append(f"bs={batch_size}")
+    
+    # C. Name: 语义-超参数-时间戳（格式：diag/frozen_encoder-lr3e-3-ckpt130530-20251213_140046）
+    base_name = os.path.basename(save_dir)
+    
+    # 提取时间戳（假设格式为 prefix_YYYYMMDD_HHMMSS 或 YYYYMMDD_HHMMSS）
+    timestamp = None
+    if "_" in base_name:
+        parts = base_name.split("_")
+        # 检查最后两部分是否是时间戳格式（YYYYMMDD_HHMMSS）
+        if len(parts) >= 2:
+            last_two = "_".join(parts[-2:])
+            if len(last_two) == 15 and last_two.replace("_", "").isdigit():  # YYYYMMDD_HHMMSS
+                timestamp = last_two
+                semantic_prefix = "_".join(parts[:-2]) if len(parts) > 2 else exp_name
+            else:
+                timestamp = parts[-1] if parts[-1] else datetime.now().strftime("%Y%m%d_%H%M%S")
+                semantic_prefix = "_".join(parts[:-1]) if len(parts) > 1 else exp_name
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            semantic_prefix = exp_name
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        semantic_prefix = exp_name
+    
+    # 构建语义前缀（基于 exp_name 和诊断标志）
+    name_parts = []
+    if label_permutation:
+        name_parts.append("perm")
+    if frozen_encoder:
+        name_parts.append("frozen")
+    if load_checkpoint:
+        # 从 checkpoint 路径提取简短标识
+        ckpt_short = os.path.basename(load_checkpoint).replace(".pt", "").replace("best_model", "ckpt")
+        if len(ckpt_short) > 15:
+            ckpt_short = ckpt_short[:15]
+        name_parts.append(ckpt_short)
+    
+    # 如果没有任何特殊标志，使用 exp_name
+    if not name_parts:
+        semantic_str = semantic_prefix
+    else:
+        semantic_str = f"{semantic_prefix}/" + "-".join(name_parts) if semantic_prefix else "-".join(name_parts)
+    
+    # 格式化学习率（使其更易读）
+    if lr >= 1:
+        lr_str = f"{lr:.0f}"
+    elif lr >= 0.01:
+        lr_str = f"{lr:.2f}".rstrip("0").rstrip(".")
+    else:
+        # 科学计数法，但格式化为更易读的形式
+        lr_str = f"{lr:.0e}".replace("e-0", "e-").replace("e+", "e")
+    
+    # 最终 name: 语义-超参数-时间戳
+    wandb_name = f"{semantic_str}-lr{lr_str}-{timestamp}"
+    
+    # D. Notes: 写一句人话（W&B 页面里一眼就懂）
+    notes_parts = []
+    if label_permutation:
+        notes_parts.append("Label Permutation Test (diagnostic)")
+    if frozen_encoder:
+        notes_parts.append("Frozen Encoder Test (diagnostic)")
+        if load_checkpoint:
+            notes_parts.append(f"from {os.path.basename(load_checkpoint)}")
+    if not notes_parts:
+        notes_parts.append(f"Baseline: {exp_name}")
+    notes = " | ".join(notes_parts)
+    
     # 初始化 wandb
     wandb.login(key="46dbe55e52d029976ffa0e29c90f0d32410e1504")
+    wandb_config = {
+        "dataset": os.path.basename(dataset_path),
+        "batch_size": batch_size,
+        "lr": lr,
+        "max_epochs": max_epochs,
+        "device": str(device),
+        "label_permutation": label_permutation,
+        "frozen_encoder": frozen_encoder,
+    }
+    if load_checkpoint is not None:
+        wandb_config["load_checkpoint"] = load_checkpoint
+    
+    # 打印 W&B 配置信息（便于调试和确认）
+    print(f"📊 W&B 配置:")
+    print(f"   Group: {group}")
+    print(f"   Name: {wandb_name}")
+    print(f"   Tags: {tags}")
+    print(f"   Notes: {notes}")
+    
     wandb.init(
         project="enzyme-kcat-prediction",
-        name=os.path.basename(save_dir),
-        config={
-            "dataset": os.path.basename(dataset_path),
-            "batch_size": batch_size,
-            "lr": lr,
-            "max_epochs": max_epochs,
-            "device": str(device),
-        }
+        name=wandb_name,
+        group=group,
+        tags=tags,
+        notes=notes,
+        config=wandb_config
     )
 
     # === Load dataset ===
     data_list = torch.load(dataset_path, weights_only=False)  # List[Data]
     print(data_list[0])  # 打印第一个图数据
     actual_num_atom_types = data_list[0].x.shape[1]
+    
+    # === Label Permutation Test (诊断测试) ===
+    # 在数据加载后、数据集划分前进行 label 随机置换
+    # 用于诊断模型是否真正使用图表示，而不是 pipeline bug
+    if label_permutation:
+        print("⚠️  启用 Label Permutation Test - 将对标签进行随机置换")
+        print("   这是诊断测试，用于验证模型是否真正使用图表示")
+        # 收集所有标签（保持原始形状）
+        all_y_list = [d.y.clone() for d in data_list]
+        # 生成随机置换索引（对样本进行置换，而不是对标签值）
+        perm = torch.randperm(len(data_list))
+        # 对每个数据样本的标签进行置换
+        for i, d in enumerate(data_list):
+            d.y = all_y_list[perm[i]].clone()
+        print(f"✅ 标签置换完成，共 {len(data_list)} 个样本")
+        print("   预期结果：如果模型真正使用图表示，val_pearson ≈ 0, val_r2 ≈ 0")
+    
+    # === 数据集划分（使用固定随机种子确保一致性） ===
+    # 设置随机种子，确保每次运行的数据集划分一致
+    # 这对于 Frozen Encoder Test 很重要，需要与 baseline 使用相同的验证集
+    np.random.seed(42)
     np.random.shuffle(data_list)
     split = int(0.8 * len(data_list))
     train_loader = DataLoader(data_list[:split], batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(data_list[split:], batch_size=batch_size)
+    print(f"📊 数据集划分：训练集 {len(data_list[:split])} 个样本，验证集 {len(data_list[split:])} 个样本")
 
     print(data_list[0].temperature)
     # === Initialize model ===
@@ -99,7 +239,64 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
         heads=heads,
         dropout=dropout
     ).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    
+    # === 加载预训练权重（如果指定） ===
+    if load_checkpoint is not None:
+        if not os.path.exists(load_checkpoint):
+            raise FileNotFoundError(f"❌ 找不到 checkpoint 文件: {load_checkpoint}")
+        print(f"📥 加载预训练权重: {load_checkpoint}")
+        model.load_state_dict(torch.load(load_checkpoint, map_location=device, weights_only=False))
+        print("✅ 预训练权重加载完成")
+    
+    # === Frozen Encoder Test (诊断测试) ===
+    # 冻结 GNN encoder，只训练最后的 MLP regression head
+    # 用于诊断 encoder 是否已经饱和
+    # 注意：如果启用 frozen_encoder，必须先加载预训练权重
+    if frozen_encoder:
+        if load_checkpoint is None:
+            raise ValueError("❌ 错误：Frozen Encoder Test 需要先加载预训练权重！请使用 --load_checkpoint 参数")
+        
+        print("⚠️  启用 Frozen Encoder Test - 将冻结 GNN encoder，只训练 MLP regression head")
+        print("   这是诊断测试，用于验证 encoder 是否已经饱和")
+        
+        # === 关键步骤：重置 MLP head 参数 ===
+        # 为了正确测试 encoder 表示是否 linearly-usable，需要从头训练 head
+        # 而不是继续使用已经训练好的 head 权重
+        print("🔄 重置 MLP head 参数（从头开始训练）...")
+        for name, module in model.named_modules():
+            if name.startswith("mlp"):
+                if isinstance(module, nn.Linear):
+                    # 重新初始化 Linear 层的权重和偏置
+                    nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+                    if module.bias is not None:
+                        nn.init.constant_(module.bias, 0)
+        print("✅ MLP head 参数已重置为随机初始化")
+        
+        # 冻结 encoder，只训练 MLP head
+        frozen_params = 0
+        trainable_params = 0
+        for name, param in model.named_parameters():
+            # 使用 startswith 而不是 in，更精确地匹配 mlp 参数
+            if not name.startswith("mlp"):
+                param.requires_grad = False
+                frozen_params += param.numel()
+            else:
+                trainable_params += param.numel()
+        print(f"✅ 参数冻结完成：冻结 {frozen_params:,} 个参数，可训练 {trainable_params:,} 个参数（MLP head）")
+        print("   预期结果：")
+        print("   - 如果性能 ≈ 原模型（Pearson ≈ 0.60）→ encoder 表示已饱和（linearly-usable）")
+        print("   - 如果性能明显下降（Pearson < 0.3）→ encoder 仍需端到端协同优化")
+        print("   - 如果性能 ≈ 0 → 实现有 bug（如没正确加载权重）")
+        if lr <= 1e-3:
+            print(f"   💡 建议：frozen encoder 时可以使用稍大的学习率（如 3e-3），当前 lr={lr}")
+    
+    # 创建 optimizer：如果冻结了 encoder，只优化可训练的参数
+    if frozen_encoder:
+        trainable_params_list = filter(lambda p: p.requires_grad, model.parameters())
+        optimizer = optim.Adam(trainable_params_list, lr=lr)
+        print(f"✅ Optimizer 已创建，只优化可训练参数（MLP head）")
+    else:
+        optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
     best_val_loss = float('inf')
 
@@ -382,6 +579,12 @@ if __name__ == '__main__':
     parser.add_argument('--save_dir', type=str, default=None, help='Output directory (if not specified, will auto-generate with timestamp)')
     parser.add_argument('--exp_name', type=str, default='kcat_attn_v1', help='Experiment name (semantic, e.g., kcat_attn_v1)')
     parser.add_argument('--no_timestamp', action='store_true', help='Disable automatic timestamp in save_dir (use fixed path, may overwrite previous results)')
+    parser.add_argument('--label_permutation', action='store_true', help='Enable Label Permutation Test (diagnostic test to verify model uses graph representation)')
+    parser.add_argument('--frozen_encoder', action='store_true', help='Enable Frozen Encoder Test (freeze GNN encoder, only train MLP regression head to diagnose encoder saturation). Requires --load_checkpoint')
+    parser.add_argument('--load_checkpoint', type=str, default=None, help='Path to pretrained model checkpoint (.pt file) to load before training')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
+    parser.add_argument('--max_epochs', type=int, default=500, help='Maximum number of training epochs')
     args = parser.parse_args()
     
     # 如果没有指定 save_dir，自动生成带时间戳的路径
@@ -409,4 +612,14 @@ if __name__ == '__main__':
         comments='Enhanced features + kcat-only prediction + angle features,9124 items ,simplist model'
     )
 
-    train(args.dataset, args.save_dir)
+    train(
+        args.dataset, 
+        args.save_dir, 
+        batch_size=args.batch_size,
+        lr=args.lr,
+        max_epochs=args.max_epochs,
+        label_permutation=args.label_permutation,
+        frozen_encoder=args.frozen_encoder,
+        load_checkpoint=args.load_checkpoint,
+        exp_name=exp_name
+    )
