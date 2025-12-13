@@ -203,16 +203,17 @@ def enhanced_build_graph(atoms, temperature):
 def main():
     print("开始执行main函数...")
     # 读取你的训练数据
-    df = pd.read_csv('successful_docked_kcattest.csv')
+    df = pd.read_csv('kcat_data_with_ids.csv')
     print(f'Loading {len(df)} samples from CSV')
 
     # 设置pocket目录 - 适配新的文件结构
     POCKET_BASE_DIR = '/home/lizihao/Work/enzyme_prediction/PGNN/sample_data/samples'
-    SAVE_PATH = 'kcat_test_new.pt'  # 使用新文件名
+    SAVE_PATH = 'kcat_train_full_1213.pt'  # 使用新文件名
 
     dataset = []
     successful_count = 0
     failed_count = 0
+    successful_indices = []  # 记录成功处理的样本索引
 
     for idx, row in tqdm(df.iterrows(), total=len(df)):
         sample_id = row['sample_id']
@@ -247,6 +248,7 @@ def main():
             data.ec = ec
             
             dataset.append(data)
+            successful_indices.append(idx)  # 记录成功处理的索引
             successful_count += 1
             
         except Exception as e:
@@ -254,8 +256,16 @@ def main():
             failed_count += 1
             continue
 
+    # 保存pt文件
     torch.save(dataset, SAVE_PATH)
     print(f'✅ Saved {len(dataset)} samples to {SAVE_PATH}')
+    
+    # 保存成功处理的CSV文件
+    successful_df = df.loc[successful_indices].copy()
+    successful_csv_path = 'successful_full_train.csv'
+    successful_df.to_csv(successful_csv_path, index=False)
+    print(f'✅ Saved {len(successful_df)} successful samples to {successful_csv_path}')
+    
     print(f'Successful: {successful_count}, Failed: {failed_count}')
     print(f'Success rate: {successful_count/(successful_count+failed_count)*100:.1f}%')
 

@@ -378,7 +378,7 @@ if __name__ == '__main__':
     from datetime import datetime
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default="data/processed/kcat_train_after_new_clean.pt", help='Path to .pt dataset')
+    parser.add_argument('--dataset', type=str, default="data/processed/kcat_full.pt", help='Path to .pt dataset')
     parser.add_argument('--save_dir', type=str, default=None, help='Output directory (if not specified, will auto-generate with timestamp)')
     parser.add_argument('--exp_name', type=str, default='kcat_attn_v1', help='Experiment name (semantic, e.g., kcat_attn_v1)')
     parser.add_argument('--no_timestamp', action='store_true', help='Disable automatic timestamp in save_dir (use fixed path, may overwrite previous results)')
@@ -398,7 +398,7 @@ if __name__ == '__main__':
 
     # 训练开始时，加上这行保存metadata
     # exp_name 可以从参数传入，或使用默认值
-    exp_name = getattr(args, 'exp_name', 'kcat_attn_v1')  # 默认实验名称
+    exp_name = getattr(args, 'exp_name', 'kcat_attn_v1_fulltrain')  # 默认实验名称
     
     save_metadata(
         save_dir=args.save_dir,
