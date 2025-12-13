@@ -1,0 +1,21 @@
+batch_size: 32
+dataset_path: data/processed/kcat_merged_hom40_train.pt + data/processed/kcat_merged_hom40_val.pt
+device: cuda:1
+edge_input_dim: 24
+exp_name: kcat_attn_hom40
+git_commit: 22e1652
+graph_builder_version: enhanced_builder
+lr: 0.001
+max_epochs: 500
+model_dropout: 0.1
+model_heads: 4
+model_hidden_dim: 128
+model_num_layers: 3
+model_version: PocketGNNKcatOnly
+node_input_dim: 52
+note: Enhanced features + kcat-only prediction + angle features,9124 items ,simplist
+  model
+run_id: run_02
+save_dir: outputs/kcat_hom40_train_20251213_220744
+start_time: '2025-12-13T22:07:44.472444'
+status: running

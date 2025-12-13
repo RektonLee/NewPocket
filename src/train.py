@@ -44,14 +44,46 @@ def compute_metrics(y_true_log, y_pred_log):
         'Pearson': pearson_val
     }
 
-def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=500, label_permutation=False, frozen_encoder=False, load_checkpoint=None, exp_name="kcat_attn_v1", loss_type="mse", patience=None):
+def train(dataset_path=None, train_dataset_path=None, val_dataset_path=None, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=500, label_permutation=False, frozen_encoder=False, load_checkpoint=None, exp_name="kcat_attn_v1", loss_type="mse", patience=None):
     from datetime import datetime
-    dataset = torch.load(dataset_path, weights_only=False)
     
-    # 检查数据集是否包含 NaN
-    for data in dataset:
-        if torch.isnan(data.x).any() or torch.isnan(data.y).any():
-            raise ValueError("数据集中包含 NaN 值")
+    # 支持两种模式：
+    # 1. 原有模式：dataset_path 指定单个文件，内部进行 8/2 划分
+    # 2. 新模式：train_dataset_path 和 val_dataset_path 指定已划分好的文件
+    use_pre_split = (train_dataset_path is not None and val_dataset_path is not None)
+    
+    if use_pre_split:
+        # 新模式：直接加载已划分好的数据集
+        print("📊 使用预划分数据集模式")
+        print(f"  训练集: {train_dataset_path}")
+        print(f"  验证集: {val_dataset_path}")
+        train_data = torch.load(train_dataset_path, weights_only=False)
+        val_data = torch.load(val_dataset_path, weights_only=False)
+        
+        # 检查数据集是否包含 NaN
+        for data in train_data + val_data:
+            if torch.isnan(data.x).any() or torch.isnan(data.y).any():
+                raise ValueError("数据集中包含 NaN 值")
+        
+        # 合并用于 label permutation（如果需要）
+        if label_permutation:
+            all_data = train_data + val_data
+        else:
+            all_data = None
+    else:
+        # 原有模式：加载单个文件，内部划分
+        if dataset_path is None:
+            raise ValueError("必须指定 --dataset 或同时指定 --train_dataset 和 --val_dataset")
+        print("📊 使用单文件模式（内部划分）")
+        print(f"  数据集: {dataset_path}")
+        dataset = torch.load(dataset_path, weights_only=False)
+        
+        # 检查数据集是否包含 NaN
+        for data in dataset:
+            if torch.isnan(data.x).any() or torch.isnan(data.y).any():
+                raise ValueError("数据集中包含 NaN 值")
+        
+        all_data = dataset
     
     device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
     os.makedirs(save_dir, exist_ok=True)
@@ -151,8 +183,14 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     
     # 初始化 wandb
     wandb.login(key="46dbe55e52d029976ffa0e29c90f0d32410e1504")
+    # 确定数据集名称用于 W&B 配置
+    if use_pre_split:
+        dataset_name = f"{os.path.basename(train_dataset_path)} + {os.path.basename(val_dataset_path)}"
+    else:
+        dataset_name = os.path.basename(dataset_path)
+    
     wandb_config = {
-        "dataset": os.path.basename(dataset_path),
+        "dataset": dataset_name,
         "batch_size": batch_size,
         "lr": lr,
         "max_epochs": max_epochs,
@@ -182,64 +220,112 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     )
 
     # === Load dataset ===
-    data_list = torch.load(dataset_path, weights_only=False)  # List[Data]
-    print(data_list[0])  # 打印第一个图数据
-    actual_num_atom_types = data_list[0].x.shape[1]
-    
-    # === Label Permutation Test (诊断测试) ===
-    # 在数据加载后、数据集划分前进行 label 随机置换
-    # 用于诊断模型是否真正使用图表示，而不是 pipeline bug
-    if label_permutation:
-        print("⚠️  启用 Label Permutation Test - 将对标签进行随机置换")
-        print("   这是诊断测试，用于验证模型是否真正使用图表示")
-        # 收集所有标签（保持原始形状）
-        all_y_list = [d.y.clone() for d in data_list]
-        # 生成随机置换索引（对样本进行置换，而不是对标签值）
-        perm = torch.randperm(len(data_list))
-        # 对每个数据样本的标签进行置换
-        for i, d in enumerate(data_list):
-            d.y = all_y_list[perm[i]].clone()
-        print(f"✅ 标签置换完成，共 {len(data_list)} 个样本")
-        print("   预期结果：如果模型真正使用图表示，val_pearson ≈ 0, val_r2 ≈ 0")
-    
-    # === 数据集划分（使用固定随机种子确保一致性） ===
-    # 设置随机种子，确保每次运行的数据集划分一致
-    # 这对于 Frozen Encoder Test 很重要，需要与 baseline 使用相同的验证集
-    np.random.seed(42)
-    np.random.shuffle(data_list)
-    
-    # === 清理 Data 对象：移除字符串属性（PyG DataLoader 无法 collate 字符串） ===
-    # PyG 的 DataLoader 会尝试将所有属性 collate 成 tensor，但字符串无法转换
-    # 需要保留的属性：x, edge_index, edge_attr, pos, y, batch, temperature (如果是 tensor)
-    # 需要移除的属性：pdb_id, sample_id, ec (字符串或非 tensor 类型)
-    print("🧹 清理 Data 对象：移除字符串属性以兼容 DataLoader...")
-    total_removed = 0
-    sample_keys_removed = set()
-    for data in data_list:
-        # 获取所有属性名（keys 是方法，需要调用）
-        keys_to_remove = []
-        for key in data.keys():
-            value = getattr(data, key)
-            # 如果不是 tensor 类型，需要移除（字符串、整数等）
-            if not isinstance(value, torch.Tensor):
-                keys_to_remove.append(key)
-                sample_keys_removed.add(key)
+    if use_pre_split:
+        # 新模式：已经划分好了
+        data_list = train_data + val_data  # 用于打印和检查
+        print(data_list[0])  # 打印第一个图数据
+        actual_num_atom_types = data_list[0].x.shape[1]
         
-        # 移除非 tensor 属性
-        for key in keys_to_remove:
-            delattr(data, key)
-            total_removed += 1
-    
-    if total_removed > 0:
-        print(f"✅ 清理完成，共移除了 {total_removed} 个非 tensor 属性")
-        print(f"   移除的属性包括: {', '.join(sorted(sample_keys_removed))}")
+        # === Label Permutation Test (诊断测试) ===
+        if label_permutation:
+            print("⚠️  启用 Label Permutation Test - 将对标签进行随机置换")
+            print("   这是诊断测试，用于验证模型是否真正使用图表示")
+            # 收集所有标签
+            all_y_list = [d.y.clone() for d in all_data]
+            perm = torch.randperm(len(all_data))
+            # 对训练集和验证集的标签进行置换
+            for i, d in enumerate(train_data):
+                d.y = all_y_list[perm[i]].clone()
+            for i, d in enumerate(val_data):
+                d.y = all_y_list[perm[len(train_data) + i]].clone()
+            print(f"✅ 标签置换完成，训练集 {len(train_data)} 个样本，验证集 {len(val_data)} 个样本")
+            print("   预期结果：如果模型真正使用图表示，val_pearson ≈ 0, val_r2 ≈ 0")
+        
+        # === 清理 Data 对象 ===
+        print("🧹 清理 Data 对象：移除字符串属性以兼容 DataLoader...")
+        total_removed = 0
+        sample_keys_removed = set()
+        for data in train_data + val_data:
+            keys_to_remove = []
+            for key in data.keys():
+                value = getattr(data, key)
+                if not isinstance(value, torch.Tensor):
+                    keys_to_remove.append(key)
+                    sample_keys_removed.add(key)
+            for key in keys_to_remove:
+                delattr(data, key)
+                total_removed += 1
+        
+        if total_removed > 0:
+            print(f"✅ 清理完成，共移除了 {total_removed} 个非 tensor 属性")
+            print(f"   移除的属性包括: {', '.join(sorted(sample_keys_removed))}")
+        else:
+            print("✅ 数据已清理，无需移除属性")
+        
+        train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_data, batch_size=batch_size)
+        print(f"📊 数据集：训练集 {len(train_data)} 个样本，验证集 {len(val_data)} 个样本")
+        
     else:
-        print("✅ 数据已清理，无需移除属性")
-    
-    split = int(0.8 * len(data_list))
-    train_loader = DataLoader(data_list[:split], batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(data_list[split:], batch_size=batch_size)
-    print(f"📊 数据集划分：训练集 {len(data_list[:split])} 个样本，验证集 {len(data_list[split:])} 个样本")
+        # 原有模式：单文件，内部划分
+        data_list = torch.load(dataset_path, weights_only=False)  # List[Data]
+        print(data_list[0])  # 打印第一个图数据
+        actual_num_atom_types = data_list[0].x.shape[1]
+        
+        # === Label Permutation Test (诊断测试) ===
+        # 在数据加载后、数据集划分前进行 label 随机置换
+        # 用于诊断模型是否真正使用图表示，而不是 pipeline bug
+        if label_permutation:
+            print("⚠️  启用 Label Permutation Test - 将对标签进行随机置换")
+            print("   这是诊断测试，用于验证模型是否真正使用图表示")
+            # 收集所有标签（保持原始形状）
+            all_y_list = [d.y.clone() for d in data_list]
+            # 生成随机置换索引（对样本进行置换，而不是对标签值）
+            perm = torch.randperm(len(data_list))
+            # 对每个数据样本的标签进行置换
+            for i, d in enumerate(data_list):
+                d.y = all_y_list[perm[i]].clone()
+            print(f"✅ 标签置换完成，共 {len(data_list)} 个样本")
+            print("   预期结果：如果模型真正使用图表示，val_pearson ≈ 0, val_r2 ≈ 0")
+        
+        # === 数据集划分（使用固定随机种子确保一致性） ===
+        # 设置随机种子，确保每次运行的数据集划分一致
+        # 这对于 Frozen Encoder Test 很重要，需要与 baseline 使用相同的验证集
+        np.random.seed(42)
+        np.random.shuffle(data_list)
+        
+        # === 清理 Data 对象：移除字符串属性（PyG DataLoader 无法 collate 字符串） ===
+        # PyG 的 DataLoader 会尝试将所有属性 collate 成 tensor，但字符串无法转换
+        # 需要保留的属性：x, edge_index, edge_attr, pos, y, batch, temperature (如果是 tensor)
+        # 需要移除的属性：pdb_id, sample_id, ec (字符串或非 tensor 类型)
+        print("🧹 清理 Data 对象：移除字符串属性以兼容 DataLoader...")
+        total_removed = 0
+        sample_keys_removed = set()
+        for data in data_list:
+            # 获取所有属性名（keys 是方法，需要调用）
+            keys_to_remove = []
+            for key in data.keys():
+                value = getattr(data, key)
+                # 如果不是 tensor 类型，需要移除（字符串、整数等）
+                if not isinstance(value, torch.Tensor):
+                    keys_to_remove.append(key)
+                    sample_keys_removed.add(key)
+            
+            # 移除非 tensor 属性
+            for key in keys_to_remove:
+                delattr(data, key)
+                total_removed += 1
+        
+        if total_removed > 0:
+            print(f"✅ 清理完成，共移除了 {total_removed} 个非 tensor 属性")
+            print(f"   移除的属性包括: {', '.join(sorted(sample_keys_removed))}")
+        else:
+            print("✅ 数据已清理，无需移除属性")
+        
+        split = int(0.8 * len(data_list))
+        train_loader = DataLoader(data_list[:split], batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(data_list[split:], batch_size=batch_size)
+        print(f"📊 数据集划分：训练集 {len(data_list[:split])} 个样本，验证集 {len(data_list[split:])} 个样本")
 
     print(data_list[0].temperature)
     # === Initialize model ===
@@ -494,10 +580,13 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     print(f"✅ Training finished. Best model saved at Epoch {best_epoch} (Val Loss: {best_val_loss:.4f})")
 
     # 训练结束后绘制图像
+    # 注意：使用实际训练的 epoch 数，而不是 max_epochs（因为可能有 early stopping）
+    actual_epochs = len(train_loss_history)
+    
     # 1. 损失曲线
     plt.figure(figsize=(10, 6))
-    plt.plot(range(1, max_epochs + 1), train_loss_history, label='Train Loss')
-    plt.plot(range(1, max_epochs + 1), val_loss_history, label='Validation Loss')
+    plt.plot(range(1, actual_epochs + 1), train_loss_history, label='Train Loss')
+    plt.plot(range(1, actual_epochs + 1), val_loss_history, label='Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.title('Training and Validation Loss')
@@ -508,8 +597,8 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     
     # 2. R2和Pearson相关系数曲线
     plt.figure(figsize=(10, 6))
-    plt.plot(range(1, max_epochs + 1), r2_history, label='R² Score')
-    plt.plot(range(1, max_epochs + 1), pearson_history, label='Pearson Correlation')
+    plt.plot(range(1, actual_epochs + 1), r2_history, label='R² Score')
+    plt.plot(range(1, actual_epochs + 1), pearson_history, label='Pearson Correlation')
     plt.xlabel('Epoch')
     plt.ylabel('Score')
     plt.title('R² and Pearson Correlation During Training')
@@ -590,7 +679,7 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     
     # 保存最终指标到文件
     metrics_df = pd.DataFrame({
-        'Epoch': range(1, max_epochs + 1),
+        'Epoch': range(1, actual_epochs + 1),
         'Train_Loss': train_loss_history,
         'Val_Loss': val_loss_history,
         'R2': r2_history,
@@ -636,7 +725,9 @@ if __name__ == '__main__':
     from datetime import datetime
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default="data/processed/kcat_full_1213.pt", help='Path to .pt dataset')
+    parser.add_argument('--dataset', type=str, default=None, help='Path to .pt dataset (单文件模式，内部进行 8/2 划分)')
+    parser.add_argument('--train_dataset', type=str, default=None, help='Path to training .pt dataset (预划分模式，需同时指定 --val_dataset)')
+    parser.add_argument('--val_dataset', type=str, default=None, help='Path to validation .pt dataset (预划分模式，需同时指定 --train_dataset)')
     parser.add_argument('--save_dir', type=str, default=None, help='Output directory (if not specified, will auto-generate with timestamp)')
     parser.add_argument('--exp_name', type=str, default='kcat_attn_v1', help='Experiment name (semantic, e.g., kcat_attn_v1)')
     parser.add_argument('--no_timestamp', action='store_true', help='Disable automatic timestamp in save_dir (use fixed path, may overwrite previous results)')
@@ -666,9 +757,25 @@ if __name__ == '__main__':
     # exp_name 可以从参数传入，或使用默认值
     exp_name = getattr(args, 'exp_name', 'kcat_attn_fulldata1213')  # 默认实验名称
     
+    # 检查参数
+    use_pre_split = (args.train_dataset is not None and args.val_dataset is not None)
+    use_single_file = (args.dataset is not None)
+    
+    if not use_pre_split and not use_single_file:
+        parser.error("必须指定 --dataset（单文件模式）或同时指定 --train_dataset 和 --val_dataset（预划分模式）")
+    
+    if use_pre_split and use_single_file:
+        parser.error("不能同时使用 --dataset 和 --train_dataset/--val_dataset，请选择一种模式")
+    
+    # 确定数据集路径用于 metadata
+    if use_pre_split:
+        dataset_path_for_metadata = f"{args.train_dataset} + {args.val_dataset}"
+    else:
+        dataset_path_for_metadata = args.dataset
+    
     save_metadata(
         save_dir=args.save_dir,
-        dataset_path=args.dataset,
+        dataset_path=dataset_path_for_metadata,
         exp_name=exp_name,
         graph_builder_version='enhanced_builder',
         gnn_model_version='PocketGNNKcatOnly',
@@ -676,8 +783,10 @@ if __name__ == '__main__':
     )
 
     train(
-        args.dataset, 
-        args.save_dir, 
+        dataset_path=args.dataset if use_single_file else None,
+        train_dataset_path=args.train_dataset if use_pre_split else None,
+        val_dataset_path=args.val_dataset if use_pre_split else None,
+        save_dir=args.save_dir, 
         batch_size=args.batch_size,
         lr=args.lr,
         max_epochs=args.max_epochs,
