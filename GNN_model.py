@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, global_mean_pool,MessagePassing, GatedGraphConv,GATConv
+from torch_geometric.nn import GCNConv, global_mean_pool, MessagePassing, GatedGraphConv, GATConv, GlobalAttention, Set2Set
 import torch_geometric.utils as utils
 
 class PocketGNN(nn.Module):
@@ -425,12 +425,19 @@ class PocketGNNWithAttentionNoTemp(nn.Module):
 
 class PocketGNNKcatOnly(nn.Module):
     """
-    专门用于kcat预测的GNN模型，支持增强的边特征（24维）
-    不包含温度特征，只预测kcat值
+    增强版 GNN 模型用于 kcat 预测
+    支持：
+    - 多种 pooling 方式（mean, attention, set2set）
+    - 序列嵌入融合（late fusion）
+    - 可配置的正则化
     """
-    def __init__(self, node_input_dim, edge_input_dim, hidden_dim=256, num_layers=6, heads=8, dropout=0.1, concat_heads=True):
+    def __init__(self, node_input_dim, edge_input_dim, hidden_dim=256, num_layers=6, 
+                 heads=8, dropout=0.1, concat_heads=True, pooling_type='mean', 
+                 use_seq_embedding=False, seq_embedding_dim=1280):
         super().__init__()
         self.node_encoder = nn.Linear(node_input_dim, hidden_dim)
+        self.pooling_type = pooling_type
+        self.use_seq_embedding = use_seq_embedding
 
         self.att_layers = nn.ModuleList()
         current_dim = hidden_dim
@@ -438,20 +445,51 @@ class PocketGNNKcatOnly(nn.Module):
             is_last = (i == num_layers - 1)
             if concat_heads and not is_last:
                 self.att_layers.append(
-                    GATConv(current_dim, hidden_dim // heads, heads=heads, dropout=dropout, concat=True, edge_dim=edge_input_dim if i==0 else None)
+                    GATConv(current_dim, hidden_dim // heads, heads=heads, dropout=dropout, 
+                           concat=True, edge_dim=edge_input_dim if i==0 else None)
                 )
                 current_dim = hidden_dim
             else:
                 self.att_layers.append(
-                    GATConv(current_dim, hidden_dim, heads=heads, dropout=dropout, concat=False, edge_dim=edge_input_dim if i==0 else None)
+                    GATConv(current_dim, hidden_dim, heads=heads, dropout=dropout, 
+                           concat=False, edge_dim=edge_input_dim if i==0 else None)
                 )
                 current_dim = hidden_dim
 
-        self.readout = global_mean_pool
+        # === 可切换的 Pooling 方式 ===
+        if pooling_type == 'mean':
+            self.readout = global_mean_pool
+            readout_dim = hidden_dim
+        elif pooling_type == 'attention':
+            # GlobalAttention 带可学习的 gate 网络
+            gate_nn = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, 1)
+            )
+            self.readout = GlobalAttention(gate_nn)
+            readout_dim = hidden_dim
+        elif pooling_type == 'set2set':
+            self.readout = Set2Set(hidden_dim, processing_steps=3)
+            readout_dim = hidden_dim * 2
+        else:
+            raise ValueError(f"不支持的 pooling 类型: {pooling_type}")
+        
+        # === 序列嵌入融合（Late Fusion） ===
+        if use_seq_embedding:
+            # 将序列嵌入映射到与图嵌入相同的维度
+            self.seq_proj = nn.Sequential(
+                nn.Linear(seq_embedding_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            )
+            mlp_input_dim = readout_dim + hidden_dim
+        else:
+            mlp_input_dim = readout_dim
 
         # MLP for kcat-only regression
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(mlp_input_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim // 2),
@@ -460,7 +498,15 @@ class PocketGNNKcatOnly(nn.Module):
             nn.Linear(hidden_dim // 2, 1)  # 只输出 kcat
         )
 
-    def forward(self, data, return_attention_weights=False):
+    def forward(self, data, seq_embedding=None, return_attention_weights=False):
+        """
+        前向传播
+        
+        参数:
+            data: PyG 图数据对象
+            seq_embedding: 序列嵌入 [batch_size, seq_embedding_dim]（可选）
+            return_attention_weights: 是否返回注意力权重
+        """
         x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
         x = self.node_encoder(x)
         x = F.relu(x)
@@ -475,10 +521,25 @@ class PocketGNNKcatOnly(nn.Module):
             if return_attention_weights:
                 all_attention_weights.append(attention_info[1])
 
-        graph_x = self.readout(x, batch)  # [batch_size, hidden_dim]
+        # Readout（图级别池化）
+        graph_x = self.readout(x, batch)  # [batch_size, readout_dim]
 
-        # 直接进行kcat回归，不融合温度特征
-        out = self.mlp(graph_x)  # [batch_size, 1]
+        # === Late Fusion: 融合序列嵌入 ===
+        if self.use_seq_embedding:
+            if seq_embedding is None:
+                # 如果模型配置为使用序列嵌入但未提供，使用零向量
+                seq_embedding = torch.zeros(graph_x.size(0), 1280, device=graph_x.device)
+            
+            # 投影序列嵌入到相同维度
+            seq_x = self.seq_proj(seq_embedding)  # [batch_size, hidden_dim]
+            
+            # 拼接图表示和序列表示
+            combined_x = torch.cat([graph_x, seq_x], dim=1)  # [batch_size, mlp_input_dim]
+        else:
+            combined_x = graph_x
+
+        # 最终预测
+        out = self.mlp(combined_x)  # [batch_size, 1]
 
         if torch.isnan(out).any():
             raise ValueError("模型输出包含 NaN 值")
@@ -487,7 +548,17 @@ class PocketGNNKcatOnly(nn.Module):
             return out, all_attention_weights
         return out
 
-    def get_graph_embedding(self, data):
+    def get_graph_embedding(self, data, seq_embedding=None):
+        """
+        获取图嵌入表示（用于可视化和分析）
+        
+        参数:
+            data: PyG 图数据对象
+            seq_embedding: 序列嵌入 [batch_size, seq_embedding_dim]（可选）
+        
+        返回:
+            combined_x: 融合后的图表示
+        """
         x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
         x = self.node_encoder(x)
         x = F.relu(x)
@@ -500,5 +571,12 @@ class PocketGNNKcatOnly(nn.Module):
             x = F.elu(x)
 
         graph_x = self.readout(x, batch)
+        
+        # 如果使用序列嵌入，也进行融合
+        if self.use_seq_embedding and seq_embedding is not None:
+            seq_x = self.seq_proj(seq_embedding)
+            combined_x = torch.cat([graph_x, seq_x], dim=1)
+            return combined_x
+        
         return graph_x
 

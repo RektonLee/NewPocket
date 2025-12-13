@@ -25,7 +25,26 @@ def compute_metrics(y_true_log, y_pred_log):
         'Pearson': pearsonr(y_true_log.flatten(), y_pred_log.flatten())[0]
     }
 
-def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=500):
+def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=500, 
+          weight_decay=0.0, dropout=0.1, loss_type='mse', scheduler_type=None, 
+          pooling_type='mean', use_seq_embedding=False, seq_embedding_path=None):
+    """
+    增强的训练函数，支持多种正则化和模型配置选项
+    
+    参数:
+        dataset_path: 数据集路径
+        save_dir: 输出目录
+        batch_size: 批次大小
+        lr: 学习率
+        max_epochs: 最大训练轮数
+        weight_decay: L2正则化系数 (推荐: 1e-4)
+        dropout: Dropout概率 (推荐: 0.3-0.4)
+        loss_type: 损失函数类型 ('mse' 或 'huber')
+        scheduler_type: 学习率调度器 (None, 'plateau', 或 'cosine')
+        pooling_type: 池化方式 ('mean' 或 'attention')
+        use_seq_embedding: 是否使用序列嵌入
+        seq_embedding_path: 序列嵌入文件路径
+    """
     dataset = torch.load(dataset_path, weights_only=False)
     
     # 检查数据集是否包含 NaN
@@ -56,7 +75,6 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
     hidden_dim = 128  # 模型隐藏维度
     num_layers = 3    # 层数
     heads = 4         # 注意力头数
-    dropout = 0.1     # Dropout 概率
 
     model = MD.PocketGNNKcatOnly(
         node_input_dim=node_input_dim,
@@ -64,11 +82,51 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
         hidden_dim=hidden_dim,
         num_layers=num_layers,
         heads=heads,
-        dropout=dropout
+        dropout=dropout,
+        pooling_type=pooling_type,
+        use_seq_embedding=use_seq_embedding
     ).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
+    
+    # === Optimizer with weight decay ===
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    
+    # === Loss function ===
+    if loss_type == 'huber':
+        criterion = nn.HuberLoss(delta=1.0)
+        print("✅ 使用 Huber Loss（对离群点更鲁棒）")
+    else:
+        criterion = nn.MSELoss()
+        print("✅ 使用 MSE Loss")
+    
+    # === Learning rate scheduler ===
+    scheduler = None
+    if scheduler_type == 'plateau':
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=10, verbose=True
+        )
+        print("✅ 使用 ReduceLROnPlateau 调度器")
+    elif scheduler_type == 'cosine':
+        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=50, T_mult=2, eta_min=1e-6
+        )
+        print("✅ 使用 CosineAnnealingWarmRestarts 调度器")
+    
     best_val_loss = float('inf')
+    
+    # 加载序列嵌入（如果使用）
+    seq_embeddings = None
+    if use_seq_embedding and seq_embedding_path:
+        seq_embeddings = torch.load(seq_embedding_path)
+        print(f"✅ 加载序列嵌入: {seq_embedding_path}")
+    
+    print(f"\n=== 训练配置 ===")
+    print(f"Weight Decay: {weight_decay}")
+    print(f"Dropout: {dropout}")
+    print(f"Loss Type: {loss_type}")
+    print(f"Scheduler: {scheduler_type}")
+    print(f"Pooling Type: {pooling_type}")
+    print(f"Use Seq Embedding: {use_seq_embedding}")
+    print(f"================\n")
 
     # 添加损失记录列表
     train_loss_history = []
@@ -172,13 +230,23 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
         val_loss_history.append(val_loss)
         r2_history.append(metrics['R2'])
         pearson_history.append(metrics['Pearson'])
+        
+        # === Learning rate scheduling ===
+        if scheduler is not None:
+            if scheduler_type == 'plateau':
+                scheduler.step(val_loss)
+            else:
+                scheduler.step()
+        
         # === Logging ===
         writer.add_scalar("Loss/train", train_loss, epoch)
         writer.add_scalar("Loss/val", val_loss, epoch)
         writer.add_scalar("R2/val", metrics['R2'], epoch)
         writer.add_scalar("Pearson/val", metrics['Pearson'], epoch)
+        if scheduler is not None:
+            writer.add_scalar("LR", optimizer.param_groups[0]['lr'], epoch)
 
-        print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | R2: {metrics['R2']:.3f}")
+        print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | R2: {metrics['R2']:.3f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
 
         # === Save best model ===
         if val_loss < best_val_loss:
@@ -302,19 +370,64 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default="kcat_train_after_new_clean.pt", help='Path to .pt dataset')
-    parser.add_argument('--save_dir', type=str, default='outputs/kcat_after_new')
+    parser = argparse.ArgumentParser(description='训练增强版 GNN 模型用于 kcat 预测')
+    
+    # 基础参数
+    parser.add_argument('--dataset', type=str, default="kcat_train_after_new_clean.pt", 
+                        help='Path to .pt dataset')
+    parser.add_argument('--save_dir', type=str, default='outputs/kcat_after_new',
+                        help='输出目录')
+    parser.add_argument('--batch_size', type=int, default=32, help='批次大小')
+    parser.add_argument('--lr', type=float, default=1e-3, help='学习率')
+    parser.add_argument('--max_epochs', type=int, default=500, help='最大训练轮数')
+    
+    # 正则化参数（阶段一）
+    parser.add_argument('--weight_decay', type=float, default=0.0, 
+                        help='L2正则化系数 (推荐: 1e-4)')
+    parser.add_argument('--dropout', type=float, default=0.1, 
+                        help='Dropout概率 (推荐: 0.3-0.4)')
+    parser.add_argument('--loss', type=str, default='mse', choices=['mse', 'huber'],
+                        help='损失函数类型')
+    parser.add_argument('--scheduler', type=str, default=None, 
+                        choices=[None, 'plateau', 'cosine'],
+                        help='学习率调度器类型')
+    
+    # 模型结构参数（阶段二）
+    parser.add_argument('--pooling_type', type=str, default='mean', 
+                        choices=['mean', 'attention'],
+                        help='图池化方式')
+    
+    # 序列嵌入参数（阶段三）
+    parser.add_argument('--use_seq_embedding', action='store_true',
+                        help='是否使用序列嵌入（ESM-2）')
+    parser.add_argument('--seq_embedding_path', type=str, default=None,
+                        help='序列嵌入文件路径 (.pt)')
+    
     args = parser.parse_args()
     from utils.metadata_utils import save_metadata
 
-    # 训练开始时，加上这行保存metadata
+    # 训练开始时，保存metadata
     save_metadata(
         save_dir=args.save_dir,
         dataset_path=args.dataset,
         graph_builder_version='enhanced_builder',
-        gnn_model_version='PocketGNNKcatOnly',
-        comments='Enhanced features + kcat-only prediction + angle features,9124 items ,simplist model'
+        gnn_model_version='PocketGNNKcatOnly_Enhanced',
+        comments=f'Enhanced training: weight_decay={args.weight_decay}, dropout={args.dropout}, '
+                f'loss={args.loss}, scheduler={args.scheduler}, pooling={args.pooling_type}, '
+                f'seq_emb={args.use_seq_embedding}'
     )
 
-    train(args.dataset, args.save_dir)
+    train(
+        dataset_path=args.dataset, 
+        save_dir=args.save_dir,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        max_epochs=args.max_epochs,
+        weight_decay=args.weight_decay,
+        dropout=args.dropout,
+        loss_type=args.loss,
+        scheduler_type=args.scheduler,
+        pooling_type=args.pooling_type,
+        use_seq_embedding=args.use_seq_embedding,
+        seq_embedding_path=args.seq_embedding_path
+    )
