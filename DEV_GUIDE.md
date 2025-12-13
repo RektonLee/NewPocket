@@ -49,8 +49,16 @@
 2.  **模型训练 (Training)**
     -   **脚本**：`src/train.py`
     -   **模型**：`GNN_model.PocketGNNKcatOnly` (硬编码指定)。
-    -   **流程**：加载 `.pt` -> 8/2 划分训练验证集 -> Adam 优化器 -> Huber Loss -> 保存最佳模型。
-    -   **监控**：WandB (在线) + TensorBoard (`outputs/` 目录)。
+    -   **流程**：加载 `.pt` -> 8/2 划分训练验证集（固定随机种子）-> Adam 优化器 -> MSE Loss -> 保存最佳模型。
+    -   **命令行参数**：
+      - `--dataset`: 数据集路径
+      - `--save_dir`: 输出目录（可选，默认自动生成）
+      - `--exp_name`: 实验名称（用于 W&B group）
+      - `--batch_size`: 批次大小（默认 32）
+      - `--lr`: 学习率（默认 1e-3）
+      - `--max_epochs`: 最大训练轮数（默认 500）
+      - `--load_checkpoint`: 加载预训练模型权重（可选）
+    -   **监控**：WandB (在线，支持 group/tags/notes) + TensorBoard (`outputs/` 目录)。
 
 3.  **预测/推理 (Inference)**
     -   **脚本**：`src/pred_range_fixed.py` (⚠️ 注意：此脚本逻辑可能滞后于训练脚本)
@@ -109,12 +117,13 @@
 
 ## 📉 训练与评估逻辑
 
-- **损失函数**：`nn.SmoothL1Loss(beta=0.5)` (即 Huber Loss)。对异常值（Outliers）比 MSE 更鲁棒。
+- **损失函数**：`nn.MSELoss()` (当前使用 MSE，可考虑改为 Huber Loss)。
 - **评估指标**：
   - $R^2$ (决定系数)
-  - Pearson Correlation (皮尔逊相关系数)
+  - Pearson Correlation (皮尔逊相关系数，已处理 NaN 和常数输入的情况)
   - MAE / RMSE
 - **Checkpoints**：根据验证集 Loss 保存 `best_model.pt`。
+- **数据集划分**：使用固定随机种子（seed=42）确保可重复性。
 - **输出产物**：
   - `loss_curve.png`, `metrics_curve.png` (训练曲线)
   - `kcat_prediction_scatter.png` (真实值 vs 预测值散点图)
@@ -152,9 +161,78 @@
 
 ---
 
+## 🔬 诊断测试功能
+
+`src/train.py` 提供了两个诊断测试功能，用于科学地评估模型和数据质量：
+
+### Test 1: Label Permutation Test
+- **目的**：验证模型是否真正使用图表示，而非 pipeline bug
+- **用法**：`--label_permutation`
+- **原理**：随机置换标签，如果模型真正依赖图表示，性能应降至接近 0
+- **预期结果**：Pearson ≈ 0, R² ≈ 0
+
+### Test 2: Frozen Encoder Test
+- **目的**：诊断 encoder 表示是否已饱和（linearly-usable）
+- **用法**：`--frozen_encoder --load_checkpoint <path>`
+- **原理**：冻结 encoder，重置 MLP head，只训练 head。如果性能接近 baseline，说明 encoder 已饱和
+- **预期结果**：
+  - 性能 ≈ baseline → encoder 已饱和
+  - 性能明显下降 → encoder 仍需端到端优化
+
+详细说明请参考 `Todiagnose.md` 和 `DIAGNOSTIC_RESULTS.md`。
+
+---
+
 ## 🚧 已知瓶颈与开放问题
 
 1.  **预测脚本不兼容**：`src/pred_range_fixed.py` 尚未完全适配 `PocketGNNKcatOnly`，直接运行可能会因为输出维度期望不一致而报错。需要重构以支持单任务/双任务模型的自动切换。
 2.  **硬编码参数**：`src/train.py` 中部分模型超参数（如 hidden_dim=128）是硬编码的，建议改为命令行参数。
 3.  **温度特征**：目前的 Canonical Pipeline (`PocketGNNKcatOnly`) 显式移除了温度特征的输入，这是一个明确的设计选择，但在未来可能需要重新评估。
+4.  ~~**Pearson 相关系数 NaN 处理**~~：✅ 已修复，现在会正确处理常数输入的情况。
+5.  ~~**数据集划分不一致**~~：✅ 已修复，使用固定随机种子（seed=42）确保可重复性。
 
+##特征
+Data(x=[321, 52], edge_index=[2, 2814], edge_attr=[2814, 24], pos=[321, 3], temperature=[1], y=[2], pdb_id='kcat_000002_61151_10A.pdb', sample_id='kcat_000002', ec='1.1.1.1')
+
+
+##正在做的事！！！（是对话形式）
+有个很科学很严谨的问题是，我的构建好的图(.pt)，有没有可能他的图表示本身就跟label没有强相关性（也就是我们模型无论怎么调，都由于数据本身、数据特征选取本身而导致无法改进）
+科学问题：有没有可能「图本身就不包含 label 信息」？
+
+这是一个非常成熟、而且必须正视的问题。
+
+一句话结论先给你：
+
+是的，而且在酶动力学任务中，这种情况非常常见。
+
+但重点不是“有没有可能”，而是：
+
+你现在是否已经到了“表示瓶颈”阶段？
+
+🔬 Test 2：Frozen encoder + linear probe
+
+步骤：
+
+用你当前最好的模型
+
+冻结 GNN
+
+只训最后一层线性头
+
+如果性能 ≈ 原来：
+
+👉 表示已饱和，问题不在模型
+
+🔬 Test 3：只用“非结构特征”对比
+
+比如：
+
+EC number
+
+sequence embedding
+
+global stats
+
+如果这些 单独就能到 Pearson ~0.5：
+
+👉 说明 pocket 几何只是“辅助信号”
