@@ -25,8 +25,9 @@ from metadata_utils import update_training_results
 import wandb
 
 def compute_metrics(y_true_log, y_pred_log):
-    y_true_log = y_true_log.numpy()
-    y_pred_log = y_pred_log.numpy()
+    # 安全地转换为 numpy：先 detach 再移到 CPU
+    y_true_log = y_true_log.detach().cpu().numpy()
+    y_pred_log = y_pred_log.detach().cpu().numpy()
     
     # 计算 Pearson 相关系数，处理常数输入的情况
     try:
@@ -43,7 +44,7 @@ def compute_metrics(y_true_log, y_pred_log):
         'Pearson': pearson_val
     }
 
-def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=500, label_permutation=False, frozen_encoder=False, load_checkpoint=None, exp_name="kcat_attn_v1"):
+def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=500, label_permutation=False, frozen_encoder=False, load_checkpoint=None, exp_name="kcat_attn_v1", loss_type="mse", patience=None):
     from datetime import datetime
     dataset = torch.load(dataset_path, weights_only=False)
     
@@ -158,6 +159,8 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
         "device": str(device),
         "label_permutation": label_permutation,
         "frozen_encoder": frozen_encoder,
+        "loss_type": loss_type,
+        "patience": patience if patience is not None else "disabled",
     }
     if load_checkpoint is not None:
         wandb_config["load_checkpoint"] = load_checkpoint
@@ -326,8 +329,18 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
         print(f"✅ Optimizer 已创建，只优化可训练参数（MLP head）")
     else:
         optimizer = optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
+    
+    # 选择损失函数：MSE 或 Huber Loss (SmoothL1Loss)
+    if loss_type.lower() == "huber":
+        criterion = nn.SmoothL1Loss(beta=0.5)
+        print("📊 使用 Huber Loss (SmoothL1Loss, beta=0.5) - 对异常值更鲁棒")
+    else:
+        criterion = nn.MSELoss()
+        print("📊 使用 MSE Loss")
+    
     best_val_loss = float('inf')
+    best_epoch = 0
+    patience_counter = 0  # Early stopping 计数器
 
     # 添加损失记录列表
     train_loss_history = []
@@ -454,14 +467,31 @@ def train(dataset_path, save_dir="outputs", batch_size=32, lr=1e-3, max_epochs=5
         # === Save best model ===
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            best_epoch = epoch
+            patience_counter = 0  # 重置 early stopping 计数器
             model_path = os.path.join(save_dir, "best_model.pt")
             torch.save(model.state_dict(), model_path)
             # 保存最佳模型到 wandb
             wandb.save(model_path)
+            print(f"   ✨ 新的最佳模型 (Epoch {best_epoch}, Val Loss: {best_val_loss:.4f})")
+        else:
+            if patience is not None:
+                patience_counter += 1
+        
+        # === Early Stopping ===
+        if patience is not None and patience_counter >= patience:
+            print(f"🛑 Early stopping triggered at epoch {epoch}")
+            print(f"   最佳模型在 Epoch {best_epoch} (Val Loss: {best_val_loss:.4f})")
+            print(f"   已等待 {patience} 个 epoch 无改善，停止训练")
+            break
 
     writer.close()
-    wandb.log({"best_val_loss": best_val_loss})
-    print("✅ Training finished. Best model saved.")
+    wandb.log({
+        "best_val_loss": best_val_loss,
+        "best_epoch": best_epoch,
+        "final_epoch": epoch
+    })
+    print(f"✅ Training finished. Best model saved at Epoch {best_epoch} (Val Loss: {best_val_loss:.4f})")
 
     # 训练结束后绘制图像
     # 1. 损失曲线
@@ -616,6 +646,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--max_epochs', type=int, default=500, help='Maximum number of training epochs')
+    parser.add_argument('--loss_type', type=str, default='mse', choices=['mse', 'huber'], help='Loss function type: mse (default) or huber (SmoothL1Loss, more robust to outliers)')
+    parser.add_argument('--patience', type=int, default=None, help='Early stopping patience (number of epochs to wait for improvement). If None, no early stopping. Recommended: 30-50')
     args = parser.parse_args()
     
     # 如果没有指定 save_dir，自动生成带时间戳的路径
@@ -652,5 +684,7 @@ if __name__ == '__main__':
         label_permutation=args.label_permutation,
         frozen_encoder=args.frozen_encoder,
         load_checkpoint=args.load_checkpoint,
-        exp_name=exp_name
+        exp_name=exp_name,
+        loss_type=args.loss_type,
+        patience=args.patience
     )

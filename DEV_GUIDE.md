@@ -222,3 +222,12 @@ Data(x=[321, 52], edge_index=[2, 2814], edge_attr=[2814, 24], pos=[321, 3], temp
 ##正在做的事！！！（是对话形式）
 有个很科学很严谨的问题是，我的构建好的图(.pt)，有没有可能他的图表示本身就跟label没有强相关性（也就是我们模型无论怎么调，都由于数据本身、数据特征选取本身而导致无法改进）
 科学问题：有没有可能「图本身就不包含 label 信息」？
+
+
+
+##推荐配置
+使用 Huber Loss + Early Stopping
+python src/train.py --dataset data/processed/kcat_full_1213.pt \
+    --loss_type huber \
+    --patience 30 \
+    --max_epochs 500
