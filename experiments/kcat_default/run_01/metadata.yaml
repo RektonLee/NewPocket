@@ -1,0 +1,10 @@
+dataset_path: kcat_train_full_1213.pt
+exp_name: kcat_default
+git_commit: f01f8c1
+graph_builder_version: enhanced_builder
+model_version: PocketGNNKcatOnly
+note: 'Enhanced: pooling=global_attention, seq_emb=True, loss=huber, wd=0.0001'
+run_id: run_01
+save_dir: outputs/kcat_enhanced_run
+start_time: '2025-12-14T11:15:12.877715'
+status: running

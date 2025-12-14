@@ -41,11 +41,11 @@
 
 ```bash
 # 1. (可选) 生成序列嵌入
-python generate_esm_embeddings.py --csv path/to/data.csv --output data/esm_embeddings.pt
+python src/generate_esm_embeddings.py --csv path/to/data.csv --output data/esm_embeddings.pt
 
 # 2. 启动增强训练
-python train.py \
-  --dataset kcat_train_after_new_clean.pt \
+python src/train.py \
+  --dataset data/processed/kcat_full_1213.pt \
   --save_dir outputs/kcat_enhanced_run \
   --weight_decay 1e-4 \
   --dropout 0.3 \
@@ -53,10 +53,10 @@ python train.py \
   --scheduler plateau \
   --pooling_type global_attention \
   --use_seq_embedding \
-  --seq_embedding_path data/esm_embeddings.pt
+  --seq_embedding_path data/processed/esm_embeddings.pt
 ```
 
 ## 4. 验证与排查
 
 *   **数据对齐**: 开启 `--use_seq_embedding` 时，脚本会尝试根据 `pdb_id` 或 `uniprot_id` 匹配 `Data` 对象与 Embedding 字典。匹配结果会打印在日志中。
-*   **兼容性**: 不加任何新参数运行 `python train.py` 将保持原有行为（除了默认 weight_decay 现在是 1e-4）。
+*   **兼容性**: 不加任何新参数运行 `python src/train.py` 将保持原有行为（除了默认 weight_decay 现在是 1e-4）。

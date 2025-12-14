@@ -1,0 +1,24 @@
+batch_size: 32
+dataset_path: data/processed/kcat_full_1213.pt
+device: cuda:1
+edge_input_dim: 24
+exp_name: kcat_default
+git_commit: f01f8c1
+graph_builder_version: enhanced_builder
+loss_type: huber
+lr: 0.001
+max_epochs: 500
+model_dropout: 0.3
+model_heads: 4
+model_hidden_dim: 128
+model_num_layers: 3
+model_version: PocketGNNKcatOnly
+node_input_dim: 52
+note: 'Enhanced: pooling=global_attention, seq_emb=True, loss=huber, wd=0.0001'
+pooling_type: global_attention
+run_id: run_03
+save_dir: outputs/kcat_enhanced_run
+start_time: '2025-12-14T11:18:18.951121'
+status: running
+use_seq_embedding: true
+weight_decay: 0.0001

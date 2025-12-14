@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, global_mean_pool,MessagePassing, GatedGraphConv,GATConv
+from torch_geometric.nn import GCNConv, global_mean_pool, MessagePassing, GatedGraphConv, GATConv, GlobalAttention
 import torch_geometric.utils as utils
 
 class PocketGNN(nn.Module):
@@ -464,7 +464,7 @@ class PocketGNNKcatOnly(nn.Module):
                 nn.ReLU(),
                 nn.Linear(hidden_dim // 2, 1)
             )
-            self.readout = utils.GlobalAttention(gate_nn=self.gate_nn)
+            self.readout = GlobalAttention(gate_nn=self.gate_nn)
         else:
             # Default to mean pooling
             self.readout = global_mean_pool

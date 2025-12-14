@@ -13,7 +13,7 @@ matplotlib.use('Agg')  # 确保在没有GUI的环境中使用
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
-from utils.metadata_utils import update_training_results
+from metadata_utils import update_training_results
 
 def compute_metrics(y_true_log, y_pred_log):
     y_true_log = y_true_log.numpy()
@@ -44,12 +44,9 @@ def train(args):
         print(f"Error loading dataset: {e}")
         return
 
-    # 检查数据集是否包含 NaN
-    # Optimization: Check first few to avoid slow start? Or keep as is.
-    # Keeping original logic but maybe skip full check for speed if confident.
-    # for data in data_list:
-    #     if torch.isnan(data.x).any() or torch.isnan(data.y).any():
-    #         raise ValueError("数据集中包含 NaN 值")
+    # 注意：Data 对象可能包含字符串类型的元数据属性（如 ec, pdb_id, sample_id）
+    # 这些属性在匹配 embeddings 时需要，但在 DataLoader collate 时会出错
+    # 因此我们在匹配完 embeddings 后再删除这些属性
     
     # === Phase 3: Load Sequence Embeddings (Late Fusion) ===
     seq_embedding_dim = 0
@@ -66,26 +63,52 @@ def train(args):
         # Check first key to see format if needed, or just try to match
         print(f"Loaded {len(embeddings_map)} embeddings.")
         
+        # Check what keys are available in embeddings (for debugging)
+        sample_keys = list(embeddings_map.keys())[:5]
+        print(f"Sample embedding keys: {sample_keys}")
+        
+        # Check what IDs are available in data (for debugging)
+        sample_data_ids = []
+        for i, data in enumerate(data_list[:5]):
+            ids = {}
+            if hasattr(data, 'sample_id'):
+                ids['sample_id'] = data.sample_id
+            if hasattr(data, 'pdb_id'):
+                ids['pdb_id'] = data.pdb_id
+            if hasattr(data, 'uniprot_id'):
+                ids['uniprot_id'] = data.uniprot_id
+            sample_data_ids.append(ids)
+        print(f"Sample data IDs: {sample_data_ids}")
+        
         matched_count = 0
+        unmatched_samples = []
         for data in data_list:
-            # Try pdb_id first, then maybe other IDs if available
-            # In data_loader.py, it seems 'pdb_id' or 'uniprot_id' might be used.
-            # train.py logs suggest d.pdb_id exists.
-            
-            # Key matching logic: try direct match, then maybe some processing
-            key = getattr(data, 'pdb_id', None)
-            if key is None:
-                key = getattr(data, 'uniprot_id', None)
-            
-            # Also handle if key is not in map (use zero vector or skip?)
-            # Instructions say: "sample_id 对齐"
-            
+            # Key matching logic: try sample_id first (as per instructions "sample_id 对齐")
+            # Then try pdb_id, uniprot_id as fallback
+            key = None
             embedding = None
-            if key in embeddings_map:
+            key_type = None
+            
+            # Priority: sample_id > pdb_id > uniprot_id
+            if hasattr(data, 'sample_id') and data.sample_id is not None:
+                key = str(data.sample_id)
+                key_type = 'sample_id'
+            elif hasattr(data, 'pdb_id') and data.pdb_id is not None:
+                key = str(data.pdb_id)
+                key_type = 'pdb_id'
+                # pdb_id might have format like "kcat_000002_61151_10A.pdb", try without extension
+                if key not in embeddings_map and '.' in key:
+                    key = key.split('.')[0]
+            elif hasattr(data, 'uniprot_id') and data.uniprot_id is not None:
+                key = str(data.uniprot_id)
+                key_type = 'uniprot_id'
+            
+            if key and key in embeddings_map:
                 embedding = embeddings_map[key]
-            else:
-                # Try cleaning key? e.g. .split('.')[0]
-                 pass
+            elif key:
+                # Record unmatched for debugging (only first few)
+                if len(unmatched_samples) < 5:
+                    unmatched_samples.append((key, key_type))
 
             if embedding is not None:
                 # Ensure it's a tensor
@@ -99,19 +122,29 @@ def train(args):
                 
                 data.seq_embedding = embedding.unsqueeze(0) # [1, dim] for batching
                 matched_count += 1
-            else:
-                 # If missing, fill with zeros? Or fail?
-                 # 'Enhance.md' implies strictness but let's be robust for now with warning
-                 # For now, let's create a zero vector if we are committed to using embeddings
-                 # But we don't know dim yet if first one fails.
-                 pass
 
         print(f"Matched embeddings for {matched_count}/{len(data_list)} samples.")
+        if unmatched_samples:
+            print(f"Sample unmatched keys: {unmatched_samples}")
         
         # If we didn't find any, we can't proceed with seq embedding
         if matched_count == 0:
             print("Warning: No embeddings matched! Disabling sequence embedding.")
             seq_embedding_dim = 0
+    
+    # 移除字符串类型的元数据属性，避免 DataLoader collate 时出错
+    # PyTorch Geometric 的 Batch.from_data_list 无法处理字符串属性
+    print("Removing string metadata attributes to avoid collate errors...")
+    for data in data_list:
+        # 移除字符串属性（这些无法转换为 tensor）
+        if hasattr(data, 'ec'):
+            delattr(data, 'ec')
+        if hasattr(data, 'pdb_id'):
+            delattr(data, 'pdb_id')
+        if hasattr(data, 'sample_id'):
+            delattr(data, 'sample_id')
+        if hasattr(data, 'uniprot_id'):
+            delattr(data, 'uniprot_id')
             args.use_seq_embedding = False
         else:
             # Fill missing with zeros
@@ -432,7 +465,7 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
-    from utils.metadata_utils import save_metadata
+    from metadata_utils import save_metadata
 
     # 训练开始时，加上这行保存metadata
     save_metadata(
