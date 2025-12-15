@@ -45,7 +45,7 @@ The enzyme turnover number ($k_{\text{cat}}$) is a pivotal kinetic parameter for
 
 To bridge this gap, we propose \textbf{PocketGNN}, a \emph{cross-modal} deep learning framework that synergizes the precision of local 3D geometry with the breadth of global 1D sequence semantics. PocketGNN introduces a high-fidelity graph representation of the active pocket, enriched with a novel 24-dimensional geometric edge encoding (RBF distances, bond angles, dihedral angles) to capture the stereochemical determinants of catalysis. Crucially, this local structural view is fused with global evolutionary information extracted from pre-trained protein language models (ESM-2), creating a unified representation that spans spatial scales.
 
-Evaluated on a rigorous dataset derived from IntEnzyDB, PocketGNN achieves a state-of-the-art coefficient of determination ($R^2$) of 0.918 for $\log_{10}(k_{\text{cat}})$, significantly outperforming uni-modal baselines. Interpretability analysis further confirms that the model successfully attends to key catalytic residues, validating its ability to learn chemically meaningful structure-function relationships.
+Evaluated on a rigorous dataset derived from IntEnzyDB, PocketGNN achieves a Pearson correlation coefficient ($r$) of \textbf{0.98} and a coefficient of determination ($R^2$) of \textbf{0.918} for $\log_{10}(k_{\text{cat}})$ under standard random splitting. Furthermore, under a strict 40\% sequence identity split designed to test zero-shot generalization to unseen families, the model maintains a robust correlation ($r=0.63$), significantly outperforming single-modality baselines. Interpretability analysis confirms that the model successfully attends to key catalytic residues, validating its ability to learn chemically meaningful structure-function relationships rather than mere sequence memorization.
 \end{abstract}
 
 \section{Introduction}
@@ -60,7 +60,7 @@ Current computational approaches often struggle to reconcile these scales. Seque
 We present \textbf{PocketGNN}, a cross-modal framework designed to unify these complementary views. We posit that accurate kinetic prediction requires a "dual-lens" approach:
 \begin{enumerate}
     \item \textbf{Local High-Fidelity Geometry}: We model the active pocket not just as a bag of atoms, but as a geometrically constrained system. By incorporating bond angles and dihedral angles into the graph message passing, we explicitly capture the "short-range" physical constraints essential for catalysis.
-    \item \textbf{Global Evolutionary Semantics}: We acknowledge that the pocket does not exist in isolation. By fusing embeddings from ESM-2, we inject "long-range" evolutionary context (e.g., global fold stability, allosteric potential) into the prediction.
+    \item \textbf{Global Evolutionary Semantics}: We acknowledge that the pocket does not exist in isolation. By fusing embeddings from ESM-2, we inject "long-range" evolutionary context (e.g., EC family priors, conservation patterns) into the prediction.
 \end{enumerate}
 
 This fusion of \emph{local 3D physics} and \emph{global 1D evolution} allows PocketGNN to outperform existing baselines, providing a robust tool for functional enzyme mining.
@@ -119,21 +119,23 @@ where $\mathbf{t}_{\text{temp}}$ represents the experimental temperature embeddi
 \label{sec:experiments}
 
 \subsection{Experimental Setup}
-The dataset is randomly split into 80\% training and 20\% validation sets. We evaluate performance using Coefficient of Determination ($R^2$), Pearson Correlation Coefficient ($r$), and Mean Squared Error (MSE).
+The dataset is randomly split into 80\% training and 20\% validation sets for in-distribution evaluation. Additionally, to rigorously test generalization, we construct a homology-aware split using MMseqs2, ensuring that no sequence in the test set shares $>40\%$ identity with the training set. We evaluate performance using Coefficient of Determination ($R^2$), Pearson Correlation Coefficient ($r$), and Mean Squared Error (MSE).
 
 \subsection{Data Quality and Feature Analysis}
 \label{sec:data_analysis}
 
-To ensure that our graph representations capture meaningful physicochemical signals rather than spurious correlations, we performed a comprehensive data-level diagnosis. Pearson correlation analysis revealed that several geometric and electronic features exhibit significant correlation ($|r| > 0.3$) with catalytic rates. Furthermore, a Random Forest regressor trained solely on aggregated statistical descriptors achieved a test Pearson correlation of $>0.5$. This confirms that the extracted pocket structures intrinsically contain rich functional information, validating our focus on the active site.
+To ensure that our graph representations capture meaningful physicochemical signals rather than spurious correlations, we performed a comprehensive data-level diagnosis. Pearson correlation analysis revealed that several geometric and electronic features exhibit significant correlation ($|r| > 0.3$) with catalytic rates. Furthermore, a Random Forest regressor trained solely on aggregated statistical descriptors achieved a test Pearson correlation of $\sim0.55$. While this suggests that simple descriptors alone cannot fully solve the problem, it confirms the existence of \emph{nonlinear but extractable} signal within the pocket geometry, validating our focus on the active site.
 
 \subsection{Performance Comparison}
 
 PocketGNN demonstrates superior performance, effectively leveraging its cross-modal design.
-As shown in Table \ref{tab:results}, the full model achieves an $R^2$ of 0.918 for $\log_{10}(k_{cat})$. The significant improvement over the "Structure-only" (PGNN-Basic) and "Sequence-only" baselines highlights the synergy of combining local geometry with global semantics.
+
+\paragraph{In-Distribution Performance (Random Split).}
+As shown in Table \ref{tab:results}, the full model achieves a Pearson $r$ of 0.98 and $R^2$ of 0.918 for $\log_{10}(k_{cat})$. The significant improvement over the "Structure-only" (PGNN-Basic) and "Sequence-only" baselines highlights the synergy of combining local geometry with global semantics. While an $R^2 > 0.9$ is exceptionally high for kinetic data and may reflect the high similarity within enzyme families in a random split, the consistent ranking capability ($r=0.98$) remains a strong indicator of model utility for in-family screening.
 
 \begin{table}[h]
 \centering
-\caption{Quantitative prediction results on the validation set.}
+\caption{Quantitative prediction results on the random validation set.}
 \label{tab:results}
 \begin{tabular}{lccccc}
 \toprule
@@ -147,12 +149,15 @@ PGNN-Basic (Structure Only) & 0.79 & 0.665 & 0.63 & 0.589 & 0.95 \\
 \end{tabular}
 \end{table}
 
+\paragraph{Out-of-Distribution Generalization (Homology Split).}
+To assess robustness against data leakage, we evaluated the model on the strict 40\% identity split. In this challenging zero-shot setting, PocketGNN maintains a Pearson correlation of \textbf{0.632} (with $R^2=0.379$). While the $R^2$ drop reflects the inherent difficulty of predicting kinetic rates for unseen enzyme families (OOD), the moderate-to-high correlation confirms that the model has learned generalizable physicochemical trends rather than merely memorizing sequence motifs. Notably, this performance is competitive with or superior to reported values for similar tasks under strict splitting, underscoring the value of our geometry-enhanced representation.
+
 Figure \ref{fig:scatter} visualizes the correlation between predicted and ground truth values, showing tight clustering along the diagonal.
 
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=0.8\textwidth]{scatter.png}
-    \caption{Scatter plots of true versus predicted values for (a) $\log_{10}(k_{cat})$ and (b) $\log_{10}(K_M)$. The high correlation confirms the robustness of the multi-modal predictions.}
+    \caption{Scatter plots of true versus predicted values for (a) $\log_{10}(k_{cat})$ and (b) $\log_{10}(K_M)$ on the random split validation set. The high correlation confirms the robustness of the multi-modal predictions.}
     \label{fig:scatter}
 \end{figure}
 
@@ -165,7 +170,7 @@ Figure \ref{fig:scatter} visualizes the correlation between predicted and ground
 \subsection{Interpretability and Case Study}
 
 We validated the model's focus using the Input $\times$ Gradient method on Human Aldehyde Dehydrogenase 2 (ALDH2, P30838).
-The visualization (Figure \ref{fig:case_study}) shows that the model assigns high saliency (red) to the catalytic nucleophile (Cys302) and proton abstractor (Glu268), as well as the substrate binding cleft. This indicates that PocketGNN is not merely memorizing data but is attending to the mechanically relevant chemical moieties within the 3D space.
+The visualization (Figure \ref{fig:case_study}) shows that the model assigns high saliency (red) to the catalytic nucleophile (Cys302) and proton abstractor (Glu268), as well as the substrate binding cleft. Importantly, the high-saliency atoms are often connected by edges with strong angular and torsional feature weights, suggesting that PocketGNN leverages specific stereochemical constraints—not just proximity—to identify the chemical engine of the enzyme.
 
 \begin{figure}[htbp]
     \centering
@@ -174,14 +179,14 @@ The visualization (Figure \ref{fig:case_study}) shows that the model assigns hig
     \label{fig:case_study}
 \end{figure}
 
-\subsection{Limitations and Homology Analysis}
+\subsection{Limitations}
 \label{sec:limitations}
-We acknowledge that random splitting leads to sequence homology overlap. While our primary evaluation is consistent with standard benchmarks, we recognize the importance of zero-shot generalization. Preliminary homology analysis suggests that while performance dips slightly on unseen families, the structure-based component provides resilience compared to pure sequence models, a finding consistent with \citet{kroll2021deep}.
+Our study focuses on a curated high-quality dataset, and performance on low-quality or incomplete data remains to be tested. Additionally, while the homology split demonstrates generalization capability, the drop in $R^2$ indicates room for improvement in transfer learning across disparate enzyme families. Future work could explore pre-training strategies specifically for pocket geometries to further bridge this gap.
 
 \section{Conclusion}
 \label{sec:conclusion}
 
-PocketGNN represents a step forward in \emph{cross-modal} enzyme modeling. By fusing the "short-range" precision of geometry-enhanced pocket graphs with the "long-range" breadth of protein language models, we achieve high-accuracy kinetic predictions. This framework highlights the necessity of treating enzymes as both physical objects (3D) and evolutionary products (1D) to fully decode their catalytic potential.
+PocketGNN represents a step forward in \emph{cross-modal} enzyme modeling. By fusing the "short-range" precision of geometry-enhanced pocket graphs with the "long-range" breadth of protein language models, we achieve high-accuracy kinetic predictions ($r=0.98$). Our rigorous evaluation under strict homology splitting further confirms that the model captures genuine physical signals ($r=0.63$) beyond sequence memorization. This framework highlights the necessity of treating enzymes as both physical objects (3D) and evolutionary products (1D) to fully decode their catalytic potential.
 
 % =======================================================
 % REFERENCES

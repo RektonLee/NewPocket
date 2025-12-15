@@ -1,4 +1,4 @@
-This is XeTeX, Version 3.141592653-2.6-0.999993 (TeX Live 2022/dev/Debian) (preloaded format=xelatex 2024.3.15)  15 DEC 2025 09:11
+This is XeTeX, Version 3.141592653-2.6-0.999993 (TeX Live 2022/dev/Debian) (preloaded format=xelatex 2024.3.15)  15 DEC 2025 09:22
 entering extended mode
  restricted \write18 enabled.
  file:line:error style messages enabled.
@@ -458,25 +458,20 @@ File: architecture.png Graphic file (type bmp)
  [2] [3] [4]
 File: scatter.png Graphic file (type bmp)
 <scatter.png>
- [5]
+ [5] [6]
 File: visualize.png Graphic file (type bmp)
 <visualize.png>
-
-
-Package natbib Warning: Author undefined for citation`kroll2021deep' 
-(natbib)                on page 6 on input line 179.
-
-[6] [7] (./gemini.aux)
+ [7] [8] (./gemini.aux)
 Package rerunfilecheck Info: File `gemini.out' has not changed.
-(rerunfilecheck)             Checksum: FB5ECDE4D2DD07A4F77DFEB9CADDC66A;2661.
+(rerunfilecheck)             Checksum: 91474F64C49AC7BE03970FC1E9C1A80C;2542.
  ) 
 Here is how much of TeX's memory you used:
  12941 strings out of 476191
  206589 string characters out of 5812072
- 527364 words of memory out of 5000000
+ 528265 words of memory out of 5000000
  33472 multiletter control sequences out of 15000+600000
  484094 words of font info for 99 fonts, out of 8000000 for 9000
  1348 hyphenation exceptions out of 8191
- 60i,10n,64p,709b,467s stack positions out of 5000i,500n,10000p,200000b,80000s
+ 60i,10n,64p,746b,405s stack positions out of 5000i,500n,10000p,200000b,80000s
 
-Output written on gemini.pdf (7 pages).
+Output written on gemini.pdf (8 pages).
