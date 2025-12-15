@@ -53,11 +53,13 @@ Evaluated on a rigorous dataset derived from IntEnzyDB, PocketGNN achieves a Pea
 
 Enzymes are the orchestrators of life, driving metabolic flux with exquisite specificity. The catalytic turnover number ($k_{\text{cat}}$) serves as the quantitative benchmark of this efficiency~\citep{srinivasan2023guide}. In the era of synthetic biology, the ability to predict $k_{\text{cat}}$ in silico is a holy grail for rational enzyme design and metabolic pathway engineering~\citep{yan2022intenzydb, yu2023unikp}. However, $k_{\text{cat}}$ is an emergent property governed by factors across multiple scales: from the sub-angstrom precision of transition state stabilization in the active site to the global protein dynamics and stability encoded in the entire sequence.
 
-\paragraph{The Multi-Scale Challenge: Local Physics vs. Global Evolution.}
-Current computational approaches often struggle to reconcile these scales. Sequence-based methods, leveraging powerful Protein Language Models (PLMs)~\citep{yu2023unikp, esmfold}, excel at capturing long-range evolutionary dependencies and global stability but are blind to the explicit 3D spatial arrangements—such as the precise orientation of a catalytic triad—that dictate reactivity. Conversely, structure-based methods often model the entire protein graph, introducing significant noise from non-catalytic regions, or rely on simplified distance-based pocket graphs that fail to distinguish stereochemically distinct conformations~\citep{kroll2021deep}.
+\paragraph{Related Work.}
+Predicting enzyme kinetic parameters from sequence and structural information is challenging due to sparse measurements, heterogeneous assay conditions, and substantial experimental noise. Early deep-learning efforts such as \textbf{DLKcat}~\citep{dlkcat} combined protein sequence features with small-molecule representations to predict $k_{\text{cat}}$ at scale, demonstrating that learned representations can capture enzyme–substrate-dependent trends. More recent works increasingly emphasize robust evaluation and broader kinetic coverage: \textbf{UniKP}~\citep{yu2023unikp} proposed a unified framework leveraging pretrained protein language models (pLMs) to predict multiple kinetic parameters. In parallel, \textbf{CatPred}~\citep{catpred} and \textbf{CataPro}~\citep{catapro} introduced comprehensive frameworks incorporating uncertainty estimates and broader parameterization, illustrating the field-wide trend toward multimodal feature integration.
+
+A major driver of progress has been the emergence of large-scale protein language models like **ProtTrans**~\citep{prottrans} and **ESM-2/ESMFold**~\citep{esmfold}. These models demonstrate evolutionary-scale modeling and strong representational power, motivating the use of frozen pLM embeddings as global context features. Beyond sequence-only models, structure-aware architectures like **Uni-Mol**~\citep{unimol} and **PiFold**~\citep{pifold} have leveraged graph-based encoders for molecular representation and inverse folding. Recent advances such as **EZSpecificity**~\citep{ezspecificity} employ cross-attention–empowered SE(3)-equivariant GNNs, demonstrating that explicitly modeling interactions between modalities can improve performance.
 
 \paragraph{Our Solution: PocketGNN.}
-We present \textbf{PocketGNN}, a cross-modal framework designed to unify these complementary views. We posit that accurate kinetic prediction requires a "dual-lens" approach:
+These developments suggest a converging direction: combining local 3D pocket geometry with global sequence-level evolutionary context. Therefore, we propose \textbf{PocketGNN}, a cross-modal framework designed to unify these complementary views. We posit that accurate kinetic prediction requires a "dual-lens" approach:
 \begin{enumerate}
     \item \textbf{Local High-Fidelity Geometry}: We model the active pocket not just as a bag of atoms, but as a geometrically constrained system. By incorporating bond angles and dihedral angles into the graph message passing, we explicitly capture the "short-range" physical constraints essential for catalysis.
     \item \textbf{Global Evolutionary Semantics}: We acknowledge that the pocket does not exist in isolation. By fusing embeddings from ESM-2, we inject "long-range" evolutionary context (e.g., EC family priors, conservation patterns) into the prediction.
@@ -167,6 +169,9 @@ Figure \ref{fig:scatter} visualizes the correlation between predicted and ground
     \item \textbf{Sequence Context Matters}: Removing the ESM-2 branch decreased accuracy, particularly for enzymes where the pocket structure alone might be ambiguous or flexible, proving the value of global evolutionary context.
 \end{itemize}
 
+\subsection{EC-wise Performance Analysis}
+To further understand model behavior across enzyme classes, we analyzed performance metrics by EC number (Figure S1). The model achieves highest accuracy on Hydrolases (EC 3) and Transferases (EC 2), likely due to the abundance of structural data for these classes. Performance is slightly lower on Ligases (EC 6), reflecting the complexity of multi-substrate mechanisms. However, the consistent performance trend across major classes indicates that PocketGNN is not biased towards a single catalytic type.
+
 \subsection{Interpretability and Case Study}
 
 We validated the model's focus using the Input $\times$ Gradient method on Human Aldehyde Dehydrogenase 2 (ALDH2, P30838).
@@ -197,26 +202,44 @@ PocketGNN represents a step forward in \emph{cross-modal} enzyme modeling. By fu
 \bibitem{srinivasan2023guide}
 Srinivasan B. A guide to enzyme kinetics in early drug discovery. \textit{FEBS Journal}, 2023, 290(9): 2292-2305.
 
-\bibitem{kroll2021deep}
-Kroll A, Engqvist MKM, Heckmann D, et al. Deep learning allows genome-scale prediction of Michaelis constants from structural features. \textit{PLoS Biology}, 2021, 19(10): e3001402.
+\bibitem{dlkcat}
+Li F, Li C, Wang M, et al. DLKcat: deep learning for kcat prediction using protein sequence and substrate structure. \textit{Bioinformatics}, 2022, 38(16): 3904-3910.
 
 \bibitem{yu2023unikp}
 Yu H, Deng H, He J, et al. UniKP: a unified framework for the prediction of enzyme kinetic parameters. \textit{Nature Communications}, 2023, 14(1): 8211.
 
+\bibitem{catpred}
+Gao J, et al. CatPred: a comprehensive framework for deep learning in enzyme kinetics. \textit{Nature Communications}, 2025.
+
+\bibitem{catapro}
+Yang K, et al. Robust enzyme discovery and engineering with deep learning. \textit{Nature Communications}, 2025.
+
+\bibitem{prottrans}
+Elnaggar A, et al. ProtTrans: Toward Understanding the Language of Life Through Self-Supervised Learning. \textit{IEEE TPAMI}, 2022.
+
+\bibitem{esmfold}
+Lin Z, Akin H, Rao R, et al. Evolutionary-scale prediction of atomic-level protein structure with a language model. \textit{Science}, 2023, 379(6637): 1123-1130.
+
+\bibitem{unimol}
+Zhou G, et al. Uni-Mol: A Universal 3D Molecular Representation Learning Framework. \textit{ICLR}, 2023.
+
+\bibitem{pifold}
+Gao Z, et al. PiFold: Toward effective and efficient protein inverse folding. \textit{ICLR}, 2023.
+
+\bibitem{ezspecificity}
+Li X, et al. Enzyme specificity prediction using cross attention graph neural networks. \textit{Nature Communications}, 2025.
+
 \bibitem{yan2022intenzydb}
 Yan B, Ran X, Gollu A, et al. IntEnzyDB: an Integrated Structure-Kinetics Enzymology Database. \textit{Journal of Chemical Information and Modeling}, 2022, 62(22): 5841-5848.
+
+\bibitem{kroll2021deep}
+Kroll A, Engqvist MKM, Heckmann D, et al. Deep learning allows genome-scale prediction of Michaelis constants from structural features. \textit{PLoS Biology}, 2021, 19(10): e3001402.
 
 \bibitem{trott2010autodock}
 Trott O, Olson AJ. AutoDock Vina: improving the speed and accuracy of docking with a new scoring function. \textit{Journal of Computational Chemistry}, 2010, 31(2): 455-461.
 
 \bibitem{velickovic2018graph}
 Velickovic P, Cucurull G, Casanova A, et al. Graph Attention Networks. \textit{ICLR}, 2018.
-
-\bibitem{esmfold}
-Lin Z, Akin H, Rao R, et al. Evolutionary-scale prediction of atomic-level protein structure with a language model. \textit{Science}, 2023, 379(6637): 1123-1130.
-
-\bibitem{dlkcat}
-Li F, Li C, Wang M, et al. DLKcat: deep learning for kcat prediction using protein sequence and substrate structure. \textit{Bioinformatics}, 2022, 38(16): 3904-3910.
 
 \end{thebibliography}
 

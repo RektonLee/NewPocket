@@ -17,12 +17,19 @@
 \providecommand*\HyPL@Entry[1]{}
 \citation{srinivasan2023guide}
 \citation{yan2022intenzydb,yu2023unikp}
-\citation{yu2023unikp,esmfold}
-\citation{kroll2021deep}
+\citation{dlkcat}
+\citation{yu2023unikp}
+\citation{catpred}
+\citation{catapro}
 \HyPL@Entry{0<</S/D>>}
 \@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
 \newlabel{sec:intro}{{1}{1}{Introduction}{section.1}{}}
-\@writefile{toc}{\contentsline {paragraph}{The Multi-Scale Challenge: Local Physics vs. Global Evolution.}{1}{section*.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Related Work.}{1}{section*.1}\protected@file@percent }
+\citation{prottrans}
+\citation{esmfold}
+\citation{unimol}
+\citation{pifold}
+\citation{ezspecificity}
 \citation{yan2022intenzydb}
 \citation{esmfold}
 \citation{trott2010autodock}
@@ -31,43 +38,50 @@
 \newlabel{sec:methods}{{2}{2}{Methods}{section.2}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Data Curation and Pipeline}{2}{subsection.2.1}\protected@file@percent }
 \newlabel{sec:data_pipeline}{{2.1}{2}{Data Curation and Pipeline}{subsection.2.1}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}PocketGNN Architecture}{2}{subsection.2.2}\protected@file@percent }
-\newlabel{sec:model}{{2.2}{2}{PocketGNN Architecture}{subsection.2.2}{}}
+\citation{velickovic2018graph}
 \@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces The cross-modal framework of PocketGNN. The model integrates a high-fidelity local graph encoder (capturing distances, angles, and torsions) with a global sequence encoder (ESM-2), bridging the gap between fine-grained geometry and evolutionary semantics.\relax }}{3}{figure.caption.3}\protected@file@percent }
 \providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
 \newlabel{fig:framework}{{1}{3}{The cross-modal framework of PocketGNN. The model integrates a high-fidelity local graph encoder (capturing distances, angles, and torsions) with a global sequence encoder (ESM-2), bridging the gap between fine-grained geometry and evolutionary semantics.\relax }{figure.caption.3}{}}
-\citation{velickovic2018graph}
-\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.2.1}Local Branch: Geometry-Enhanced Graph Encoder}{4}{subsubsection.2.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}PocketGNN Architecture}{3}{subsection.2.2}\protected@file@percent }
+\newlabel{sec:model}{{2.2}{3}{PocketGNN Architecture}{subsection.2.2}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.2.1}Local Branch: Geometry-Enhanced Graph Encoder}{3}{subsubsection.2.2.1}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsubsection}{\numberline {2.2.2}Global Branch: Sequence Semantics Fusion}{4}{subsubsection.2.2.2}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsubsection}{\numberline {2.2.3}Cross-Modal Late Fusion}{4}{subsubsection.2.2.3}\protected@file@percent }
 \@writefile{toc}{\contentsline {section}{\numberline {3}Experiments}{4}{section.3}\protected@file@percent }
 \newlabel{sec:experiments}{{3}{4}{Experiments}{section.3}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Experimental Setup}{4}{subsection.3.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Data Quality and Feature Analysis}{5}{subsection.3.2}\protected@file@percent }
-\newlabel{sec:data_analysis}{{3.2}{5}{Data Quality and Feature Analysis}{subsection.3.2}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Performance Comparison}{5}{subsection.3.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{In-Distribution Performance (Random Split).}{5}{section*.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Data Quality and Feature Analysis}{4}{subsection.3.2}\protected@file@percent }
+\newlabel{sec:data_analysis}{{3.2}{4}{Data Quality and Feature Analysis}{subsection.3.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Performance Comparison}{4}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{In-Distribution Performance (Random Split).}{4}{section*.4}\protected@file@percent }
 \@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Quantitative prediction results on the random validation set.\relax }}{5}{table.caption.5}\protected@file@percent }
 \newlabel{tab:results}{{1}{5}{Quantitative prediction results on the random validation set.\relax }{table.caption.5}{}}
 \@writefile{toc}{\contentsline {paragraph}{Out-of-Distribution Generalization (Homology Split).}{5}{section*.6}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Ablation Studies}{5}{subsection.3.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}EC-wise Performance Analysis}{5}{subsection.3.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6}Interpretability and Case Study}{5}{subsection.3.6}\protected@file@percent }
 \@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Scatter plots of true versus predicted values for (a) $\qopname  \relax o{log}_{10}(k_{cat})$ and (b) $\qopname  \relax o{log}_{10}(K_M)$ on the random split validation set. The high correlation confirms the robustness of the multi-modal predictions.\relax }}{6}{figure.caption.7}\protected@file@percent }
 \newlabel{fig:scatter}{{2}{6}{Scatter plots of true versus predicted values for (a) $\log _{10}(k_{cat})$ and (b) $\log _{10}(K_M)$ on the random split validation set. The high correlation confirms the robustness of the multi-modal predictions.\relax }{figure.caption.7}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Interpretability and Case Study}{7}{subsection.3.5}\protected@file@percent }
 \@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Visualization of atomic contributions for ALDH2. High-saliency atoms (red) coincide with key catalytic residues, demonstrating the model's ability to identify the chemical engine of the enzyme.\relax }}{7}{figure.caption.8}\protected@file@percent }
 \newlabel{fig:case_study}{{3}{7}{Visualization of atomic contributions for ALDH2. High-saliency atoms (red) coincide with key catalytic residues, demonstrating the model's ability to identify the chemical engine of the enzyme.\relax }{figure.caption.8}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.6}Limitations}{7}{subsection.3.6}\protected@file@percent }
-\newlabel{sec:limitations}{{3.6}{7}{Limitations}{subsection.3.6}{}}
 \bibstyle{unsrt}
 \bibcite{srinivasan2023guide}{{1}{}{{}}{{}}}
-\bibcite{kroll2021deep}{{2}{}{{}}{{}}}
+\bibcite{dlkcat}{{2}{}{{}}{{}}}
 \bibcite{yu2023unikp}{{3}{}{{}}{{}}}
-\bibcite{yan2022intenzydb}{{4}{}{{}}{{}}}
-\bibcite{trott2010autodock}{{5}{}{{}}{{}}}
-\bibcite{velickovic2018graph}{{6}{}{{}}{{}}}
+\bibcite{catpred}{{4}{}{{}}{{}}}
+\bibcite{catapro}{{5}{}{{}}{{}}}
+\bibcite{prottrans}{{6}{}{{}}{{}}}
 \bibcite{esmfold}{{7}{}{{}}{{}}}
-\bibcite{dlkcat}{{8}{}{{}}{{}}}
-\providecommand\NAT@force@numbers{}\NAT@force@numbers
+\bibcite{unimol}{{8}{}{{}}{{}}}
+\bibcite{pifold}{{9}{}{{}}{{}}}
+\bibcite{ezspecificity}{{10}{}{{}}{{}}}
+\bibcite{yan2022intenzydb}{{11}{}{{}}{{}}}
+\bibcite{kroll2021deep}{{12}{}{{}}{{}}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.7}Limitations}{8}{subsection.3.7}\protected@file@percent }
+\newlabel{sec:limitations}{{3.7}{8}{Limitations}{subsection.3.7}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {4}Conclusion}{8}{section.4}\protected@file@percent }
 \newlabel{sec:conclusion}{{4}{8}{Conclusion}{section.4}{}}
-\gdef \@abspage@last{8}
+\bibcite{trott2010autodock}{{13}{}{{}}{{}}}
+\bibcite{velickovic2018graph}{{14}{}{{}}{{}}}
+\providecommand\NAT@force@numbers{}\NAT@force@numbers
+\gdef \@abspage@last{9}
