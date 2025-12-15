@@ -13,7 +13,8 @@ matplotlib.use('Agg')  # 确保在没有GUI的环境中使用
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
-from metadata_utils import update_training_results
+from metadata_utils import update_training_results, save_metadata
+import wandb
 
 def compute_metrics(y_true_log, y_pred_log):
     y_true_log = y_true_log.numpy()
@@ -36,6 +37,121 @@ def train(args):
     if hasattr(args, 'batch_size'): batch_size = args.batch_size
     if hasattr(args, 'lr'): lr = args.lr
     if hasattr(args, 'epochs'): max_epochs = args.epochs
+    
+    # ========== 实验命名和目录管理 ==========
+    # 获取实验名称和 run_id（通过 save_metadata，它会自动管理 experiments/ 目录）
+    # 如果用户没有指定 exp_name，使用默认值
+    exp_name = getattr(args, 'exp_name', 'kcat_default')
+    exp_name, run_id = save_metadata(
+        save_dir=save_dir,
+        dataset_path=dataset_path,
+        exp_name=exp_name,
+        graph_builder_version='enhanced_builder',
+        gnn_model_version='PocketGNNKcatOnly',
+        comments=f'Enhanced: pooling={args.pooling_type}, seq_emb={args.use_seq_embedding}, loss={args.loss}, wd={args.weight_decay}'
+    )
+    
+    # 统一命名规则：确保 outputs/、wandb/、experiments/ 目录中的内容对应
+    # wandb run name 格式: {exp_name}_{run_id}，例如 "kcat_attn_v1_run_01"
+    wandb_run_name = f"{exp_name}_{run_id}"
+    
+    # 定义 device（在 wandb_config 之前）
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    
+    # ========== 初始化 WandB ==========
+    # 登录 wandb（使用提供的 API key）
+    wandb.login(key="46dbe55e52d029976ffa0e29c90f0d32410e1504")
+    
+    # 创建 wandb config 字典
+    wandb_config = {
+        "dataset": os.path.basename(dataset_path),
+        "batch_size": batch_size,
+        "lr": lr,
+        "max_epochs": max_epochs,
+        "device": str(device),
+        "loss_type": args.loss,
+        "weight_decay": args.weight_decay,
+        "dropout": args.dropout,
+        "scheduler": args.scheduler,
+        "pooling_type": args.pooling_type,
+        "use_seq_embedding": args.use_seq_embedding,
+        "exp_name": exp_name,
+        "run_id": run_id,
+        "save_dir": save_dir,
+    }
+    
+    # 创建 tags 用于在 wandb 界面快速筛选
+    # 基于关键参数生成 tags，方便在 wandb 中快速找到对应的 run
+    tags = [
+        f"pooling_{args.pooling_type}",
+        f"scheduler_{args.scheduler}",
+        f"loss_{args.loss}",
+    ]
+    if args.use_seq_embedding:
+        tags.append("with_seq_emb")
+    else:
+        tags.append("no_seq_emb")
+    tags.append(exp_name)  # 添加 exp_name 作为 tag
+    
+    # 创建 notes（描述信息），包含关键参数摘要
+    # 这样在 wandb 的 run 列表中就能看到关键信息，不需要点进去
+    notes = f"""Key Parameters:
+- Pooling: {args.pooling_type}
+- Scheduler: {args.scheduler}
+- Loss: {args.loss}
+- Dropout: {args.dropout}
+- Weight Decay: {args.weight_decay}
+- Seq Embedding: {'Yes' if args.use_seq_embedding else 'No'}
+- Dataset: {os.path.basename(dataset_path)}
+- Save Dir: {save_dir}
+"""
+    
+    # 初始化 wandb run
+    # 注意：run name 在这里指定，确保与 experiments/ 目录中的命名对应
+    wandb.init(
+        project="enzyme_kcat_prediction",  # wandb 项目名称
+        name=wandb_run_name,  # ⭐ 在这里指定 run 名称：格式为 {exp_name}_{run_id}
+        config=wandb_config,
+        tags=tags,  # 添加 tags 用于快速筛选
+        notes=notes,  # 添加 notes 显示关键参数摘要
+        dir=os.path.dirname(save_dir) if save_dir else ".",  # wandb 日志目录
+    )
+    
+    # 在本地保存参数配置文件，方便快速查看
+    os.makedirs(save_dir, exist_ok=True)
+    config_file = os.path.join(save_dir, "training_config.txt")
+    with open(config_file, 'w', encoding='utf-8') as f:
+        f.write("=" * 60 + "\n")
+        f.write("Training Configuration\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"Experiment Name: {exp_name}\n")
+        f.write(f"Run ID: {run_id}\n")
+        f.write(f"WandB Run Name: {wandb_run_name}\n")
+        f.write(f"\n--- Dataset ---\n")
+        f.write(f"Dataset Path: {dataset_path}\n")
+        f.write(f"Dataset Name: {os.path.basename(dataset_path)}\n")
+        f.write(f"\n--- Model Architecture ---\n")
+        f.write(f"Pooling Type: {args.pooling_type}\n")
+        f.write(f"Use Seq Embedding: {args.use_seq_embedding}\n")
+        if args.use_seq_embedding:
+            f.write(f"Seq Embedding Path: {args.seq_embedding_path}\n")
+        f.write(f"\n--- Training Hyperparameters ---\n")
+        f.write(f"Batch Size: {batch_size}\n")
+        f.write(f"Learning Rate: {lr}\n")
+        f.write(f"Max Epochs: {max_epochs}\n")
+        f.write(f"Loss Type: {args.loss}\n")
+        f.write(f"Dropout: {args.dropout}\n")
+        f.write(f"Weight Decay: {args.weight_decay}\n")
+        f.write(f"Scheduler: {args.scheduler}\n")
+        f.write(f"\n--- Environment ---\n")
+        f.write(f"Device: {device}\n")
+        f.write(f"Save Directory: {save_dir}\n")
+        f.write(f"\n--- Command Line Arguments ---\n")
+        # 保存完整的命令行参数（便于复现）
+        import sys
+        f.write(f"Command: {' '.join(sys.argv)}\n")
+        f.write("\n" + "=" * 60 + "\n")
+    print(f"✅ Training configuration saved to: {config_file}")
 
     print(f"Loading dataset from {dataset_path}...")
     try:
@@ -145,15 +261,18 @@ def train(args):
             delattr(data, 'sample_id')
         if hasattr(data, 'uniprot_id'):
             delattr(data, 'uniprot_id')
-            args.use_seq_embedding = False
-        else:
-            # Fill missing with zeros
-            for data in data_list:
-                if not hasattr(data, 'seq_embedding'):
-                    data.seq_embedding = torch.zeros((1, seq_embedding_dim), dtype=torch.float)
-
     
-    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    # 如果启用了seq_embedding但某些样本没有匹配到，用零向量填充
+    if args.use_seq_embedding and seq_embedding_dim > 0:
+        missing_count = 0
+        for data in data_list:
+            if not hasattr(data, 'seq_embedding'):
+                data.seq_embedding = torch.zeros((1, seq_embedding_dim), dtype=torch.float)
+                missing_count += 1
+        if missing_count > 0:
+            print(f"Warning: {missing_count} samples missing seq_embedding, filled with zeros.")
+
+    # device 已在前面定义（用于 wandb_config）
     os.makedirs(save_dir, exist_ok=True)
     writer = SummaryWriter(save_dir)
 
@@ -185,7 +304,8 @@ def train(args):
         heads=heads,
         dropout=dropout,
         pooling_type=args.pooling_type,
-        seq_embedding_dim=seq_embedding_dim
+        use_seq_embedding=args.use_seq_embedding,
+        seq_embedding_dim=seq_embedding_dim if args.use_seq_embedding else 0
     ).to(device)
     
     # === Phase 1: Optimizer & Loss & Scheduler ===
@@ -321,13 +441,27 @@ def train(args):
         writer.add_scalar("Loss/val", val_loss, epoch)
         writer.add_scalar("R2/val", metrics['R2'], epoch)
         writer.add_scalar("Pearson/val", metrics['Pearson'], epoch)
+        
+        # 记录到 wandb
+        wandb.log({
+            "Loss/train": train_loss,
+            "Loss/val": val_loss,
+            "R2/val": metrics['R2'],
+            "Pearson/val": metrics['Pearson'],
+            "MAE/val": metrics['MAE'],
+            "RMSE/val": metrics['RMSE'],
+            "epoch": epoch
+        })
 
         print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | R2: {metrics['R2']:.3f}")
 
         # === Save best model ===
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pt"))
+            best_model_path = os.path.join(save_dir, "best_model.pt")
+            torch.save(model.state_dict(), best_model_path)
+            # 记录最佳模型到 wandb
+            wandb.log({"best_val_loss": best_val_loss, "best_epoch": epoch})
 
     writer.close()
     print("✅ Training finished. Best model saved.")
@@ -389,6 +523,10 @@ def train(args):
     all_y_true = torch.cat(all_y_true, dim=0).numpy()
     all_y_pred = torch.cat(all_y_pred, dim=0).numpy()
     
+    # 计算最终指标（在绘制图像之前）
+    r2_kcat = r2_score(all_y_true.flatten(), all_y_pred.flatten())
+    pearson_end = pearsonr(all_y_true.flatten(), all_y_pred.flatten())[0]
+    
     # 绘制kcat散点图（只有一个图）
     plt.figure(figsize=(8, 6))
     
@@ -398,8 +536,6 @@ def train(args):
              [all_y_true.min(), all_y_true.max()], 'r--')
     plt.xlabel('True kcat (log10)')
     plt.ylabel('Predicted kcat (log10)')
-    r2_kcat = r2_score(all_y_true.flatten(), all_y_pred.flatten())
-    pearson_end = pearsonr(all_y_true.flatten(), all_y_pred.flatten())[0]
     plt.title(f'kcat: True vs Predicted (R² = {r2_kcat:.3f})')
     plt.grid(True, alpha=0.3)
     
@@ -430,6 +566,19 @@ def train(args):
     })
     metrics_df.to_csv(os.path.join(save_dir, 'training_metrics.csv'), index=False)
     
+    # 记录最终指标到 wandb（在计算完 r2_kcat 和 pearson_end 之后）
+    wandb.log({
+        "final/best_val_loss": best_val_loss,
+        "final/r2": r2_kcat,
+        "final/pearson": pearson_end
+    })
+    
+    # 上传最终图像到 wandb（可选）
+    if os.path.exists(os.path.join(save_dir, 'kcat_prediction_scatter.png')):
+        wandb.log({"prediction_scatter": wandb.Image(os.path.join(save_dir, 'kcat_prediction_scatter.png'))})
+    if os.path.exists(os.path.join(save_dir, 'loss_curve.png')):
+        wandb.log({"loss_curve": wandb.Image(os.path.join(save_dir, 'loss_curve.png'))})
+    
     # 记录最终结果到共享表
     try:
         update_training_results(
@@ -441,7 +590,8 @@ def train(args):
         )
     except Exception as _:
         pass
-
+    
+    wandb.finish()
     print("✅ Training finished. Best model and plots saved to", save_dir)
 
 if __name__ == '__main__':
@@ -450,6 +600,15 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str, default="kcat_train_after_new_clean.pt", help='Path to .pt dataset')
     parser.add_argument('--save_dir', type=str, default='outputs/kcat_after_new')
     
+    # ========== 实验命名参数 ==========
+    # ⭐ 在这里指定实验名称（exp_name）
+    # 格式建议：描述性名称，如 "kcat_attn_v1", "kcat_seq_emb_v2" 等
+    # 如果不指定，将使用默认值 "kcat_default"
+    # run_id 会自动由 metadata_utils 生成（如 run_01, run_02...）
+    # wandb run name 会自动设置为 {exp_name}_{run_id}，确保与 experiments/ 目录对应
+    parser.add_argument('--exp_name', type=str, default='kcat_esm_full', 
+                       help='Experiment name (e.g., "kcat_attn_v1"). Used for experiments/ and wandb run naming.')
+    
     # Phase 1: Training & Regularization
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='L2 regularization')
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
@@ -457,23 +616,12 @@ if __name__ == '__main__':
     parser.add_argument('--scheduler', type=str, default='none', choices=['none', 'plateau', 'cosine'], help='LR Scheduler')
     
     # Phase 2: Pooling
-    parser.add_argument('--pooling_type', type=str, default='mean', choices=['mean', 'global_attention'], help='Graph pooling type')
+    parser.add_argument('--pooling_type', type=str, default='mean', choices=['mean', 'global_attention', 'set2set'], help='Graph pooling type: mean, global_attention, or set2set')
     
     # Phase 3: ESM Sequence Embedding
     parser.add_argument('--use_seq_embedding', action='store_true', help='Enable ESM sequence embedding (Late Fusion)')
     parser.add_argument('--seq_embedding_path', type=str, default='data/esm_embeddings.pt', help='Path to ESM embeddings dictionary')
     
     args = parser.parse_args()
-    
-    from metadata_utils import save_metadata
-
-    # 训练开始时，加上这行保存metadata
-    save_metadata(
-        save_dir=args.save_dir,
-        dataset_path=args.dataset,
-        graph_builder_version='enhanced_builder',
-        gnn_model_version='PocketGNNKcatOnly',
-        comments=f'Enhanced: pooling={args.pooling_type}, seq_emb={args.use_seq_embedding}, loss={args.loss}, wd={args.weight_decay}'
-    )
 
     train(args)

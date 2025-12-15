@@ -74,7 +74,8 @@ def clean_data_objects(data_list):
         print("✅ 数据已清理，无需移除属性")
 
 def test(test_dataset_path, model_path, save_dir="outputs/test_results", batch_size=32, 
-         hidden_dim=128, num_layers=3, heads=4, dropout=0.1):
+         hidden_dim=128, num_layers=3, heads=4, dropout=0.1, pooling_type='mean',
+         use_seq_embedding=False, seq_embedding_path=None):
     """
     在测试集上评估模型
     
@@ -87,6 +88,9 @@ def test(test_dataset_path, model_path, save_dir="outputs/test_results", batch_s
         num_layers: 模型层数（需要与训练时一致）
         heads: 注意力头数（需要与训练时一致）
         dropout: Dropout 概率（需要与训练时一致）
+        pooling_type: 池化类型（需要与训练时一致，默认 'mean'）
+        use_seq_embedding: 是否使用序列嵌入（需要与训练时一致）
+        seq_embedding_path: 序列嵌入文件路径（如果启用序列嵌入）
     """
     device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
     os.makedirs(save_dir, exist_ok=True)
@@ -113,8 +117,114 @@ def test(test_dataset_path, model_path, save_dir="outputs/test_results", batch_s
         if torch.isnan(data.x).any() or torch.isnan(data.y).any():
             raise ValueError(f"❌ 测试数据集中第 {i} 个样本包含 NaN 值")
     
-    # === 清理数据对象 ===
-    clean_data_objects(test_data_list)
+    # === 加载序列嵌入（如果启用） ===
+    seq_embedding_dim = 0
+    if use_seq_embedding:
+        if seq_embedding_path is None:
+            raise ValueError("❌ 启用序列嵌入但未提供 seq_embedding_path")
+        
+        print(f"\n📥 加载序列嵌入: {seq_embedding_path}")
+        if not os.path.exists(seq_embedding_path):
+            raise FileNotFoundError(f"❌ 找不到序列嵌入文件: {seq_embedding_path}")
+        
+        embeddings_map = torch.load(seq_embedding_path, weights_only=False)
+        print(f"✅ 加载了 {len(embeddings_map)} 个序列嵌入")
+        
+        # 匹配序列嵌入（与 train.py 逻辑一致）
+        matched_count = 0
+        unmatched_samples = []
+        for data in test_data_list:
+            key = None
+            embedding = None
+            key_type = None
+            
+            # Priority: sample_id > pdb_id > uniprot_id
+            # 尝试多个key，直到找到匹配的
+            if hasattr(data, 'sample_id') and data.sample_id is not None:
+                key = str(data.sample_id)
+                key_type = 'sample_id'
+                if key in embeddings_map:
+                    embedding = embeddings_map[key]
+            
+            # 如果 sample_id 不匹配，尝试 pdb_id
+            if embedding is None and hasattr(data, 'pdb_id') and data.pdb_id is not None:
+                key = str(data.pdb_id)
+                key_type = 'pdb_id'
+                if key in embeddings_map:
+                    embedding = embeddings_map[key]
+                # 如果完整 pdb_id 不匹配，尝试去掉扩展名
+                elif '.' in key:
+                    key_no_ext = key.split('.')[0]
+                    if key_no_ext in embeddings_map:
+                        embedding = embeddings_map[key_no_ext]
+                        key = key_no_ext
+            
+            # 如果 pdb_id 也不匹配，尝试 uniprot_id
+            if embedding is None and hasattr(data, 'uniprot_id') and data.uniprot_id is not None:
+                key = str(data.uniprot_id)
+                key_type = 'uniprot_id'
+                if key in embeddings_map:
+                    embedding = embeddings_map[key]
+            
+            # 记录未匹配的样本（用于调试）
+            if embedding is None:
+                if len(unmatched_samples) < 5:
+                    unmatched_samples.append((key, key_type))
+            
+            if embedding is not None:
+                if not isinstance(embedding, torch.Tensor):
+                    embedding = torch.tensor(embedding, dtype=torch.float)
+                
+                if seq_embedding_dim == 0:
+                    seq_embedding_dim = embedding.shape[0]
+                    print(f"✅ 序列嵌入维度: {seq_embedding_dim}")
+                
+                data.seq_embedding = embedding.unsqueeze(0)  # [1, dim]
+                matched_count += 1
+        
+        print(f"✅ 匹配了 {matched_count}/{len(test_data_list)} 个序列嵌入")
+        if unmatched_samples:
+            print(f"   示例未匹配的keys: {unmatched_samples}")
+        
+        # 重要：即使匹配失败，如果训练时使用了序列嵌入，测试时也必须使用
+        # 否则模型结构不匹配会导致加载失败
+        # 如果匹配失败，会用零向量填充（在后续代码中处理）
+        if matched_count == 0:
+            print("⚠️  警告: 没有匹配到任何序列嵌入")
+            print("   如果训练时使用了序列嵌入，将用零向量填充以保持模型结构一致")
+            # 尝试从第一个embedding推断维度
+            if len(embeddings_map) > 0:
+                first_emb = list(embeddings_map.values())[0]
+                if isinstance(first_emb, torch.Tensor):
+                    seq_embedding_dim = first_emb.shape[0]
+                else:
+                    seq_embedding_dim = len(first_emb)
+                print(f"   从embedding文件推断维度: {seq_embedding_dim}")
+            else:
+                raise ValueError("无法推断序列嵌入维度，且没有匹配到任何嵌入")
+    
+    # === 清理数据对象（移除字符串属性） ===
+    # 与 train.py 保持一致：先匹配序列嵌入，再删除字符串属性
+    print("\n🧹 清理数据对象：移除字符串属性...")
+    for data in test_data_list:
+        if hasattr(data, 'ec'):
+            delattr(data, 'ec')
+        if hasattr(data, 'pdb_id'):
+            delattr(data, 'pdb_id')
+        if hasattr(data, 'sample_id'):
+            delattr(data, 'sample_id')
+        if hasattr(data, 'uniprot_id'):
+            delattr(data, 'uniprot_id')
+    
+    # 如果启用了序列嵌入但某些样本没有匹配到，用零向量填充
+    if use_seq_embedding and seq_embedding_dim > 0:
+        missing_count = 0
+        for data in test_data_list:
+            if not hasattr(data, 'seq_embedding'):
+                data.seq_embedding = torch.zeros((1, seq_embedding_dim), dtype=torch.float)
+                missing_count += 1
+        if missing_count > 0:
+            print(f"⚠️  警告: {missing_count} 个样本缺少序列嵌入，已用零向量填充")
     
     # === 创建 DataLoader ===
     test_loader = DataLoader(test_data_list, batch_size=batch_size, shuffle=False)
@@ -133,7 +243,10 @@ def test(test_dataset_path, model_path, save_dir="outputs/test_results", batch_s
         hidden_dim=hidden_dim,
         num_layers=num_layers,
         heads=heads,
-        dropout=dropout
+        dropout=dropout,
+        pooling_type=pooling_type,
+        use_seq_embedding=use_seq_embedding,
+        seq_embedding_dim=seq_embedding_dim if use_seq_embedding else 0
     ).to(device)
     
     # === 加载模型权重 ===
@@ -227,7 +340,10 @@ def test(test_dataset_path, model_path, save_dir="outputs/test_results", batch_s
             'hidden_dim': int(hidden_dim),
             'num_layers': int(num_layers),
             'heads': int(heads),
-            'dropout': float(dropout)
+            'dropout': float(dropout),
+            'pooling_type': str(pooling_type),
+            'use_seq_embedding': bool(use_seq_embedding),
+            'seq_embedding_dim': int(seq_embedding_dim) if use_seq_embedding else 0
         }
     }
     
@@ -349,6 +465,13 @@ if __name__ == '__main__':
                        help='注意力头数（需要与训练时一致，默认: 4）')
     parser.add_argument('--dropout', type=float, default=0.1,
                        help='Dropout 概率（需要与训练时一致，默认: 0.1）')
+    parser.add_argument('--pooling_type', type=str, default='set2set',
+                       choices=['mean', 'global_attention', 'set2set'],
+                       help='池化类型（需要与训练时一致，默认: mean）')
+    parser.add_argument('--use_seq_embedding', action='store_true',
+                       help='启用序列嵌入（需要与训练时一致）')
+    parser.add_argument('--seq_embedding_path', type=str, default=None,
+                       help='序列嵌入文件路径（如果启用序列嵌入）')
     
     args = parser.parse_args()
     
@@ -366,6 +489,9 @@ if __name__ == '__main__':
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         heads=args.heads,
-        dropout=args.dropout
+        dropout=args.dropout,
+        pooling_type=args.pooling_type,
+        use_seq_embedding=args.use_seq_embedding,
+        seq_embedding_path=args.seq_embedding_path
     )
 

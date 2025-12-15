@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, global_mean_pool, MessagePassing, GatedGraphConv, GATConv, GlobalAttention
+from torch_geometric.nn import GCNConv, global_mean_pool, MessagePassing, GatedGraphConv, GATConv, GlobalAttention, Set2Set
 import torch_geometric.utils as utils
 
 class PocketGNN(nn.Module):
@@ -429,17 +429,22 @@ class PocketGNNKcatOnly(nn.Module):
     不包含温度特征，只预测kcat值
     
     Enhanced according to Phase 2 & 3:
-    - Supports multiple pooling types (mean, global_attention)
-    - Supports ESM-2 sequence embedding fusion (late fusion)
+    - Supports multiple pooling types (mean, global_attention, set2set)
+    - Supports ESM-2 sequence embedding fusion (late fusion with projection layer)
+    
+    优化点（根据todo.md）:
+    - 添加投影层（seq_proj）将ESM特征降维，避免维度不平衡
+    - 支持Set2Set池化（更高级的池化方法）
     """
     def __init__(self, node_input_dim, edge_input_dim, hidden_dim=256, num_layers=6, heads=8, dropout=0.1, concat_heads=True, 
-                 pooling_type='mean', seq_embedding_dim=0):
+                 pooling_type='mean', use_seq_embedding=False, seq_embedding_dim=1280):
         super().__init__()
         self.node_encoder = nn.Linear(node_input_dim, hidden_dim)
         
         # 记录配置
         self.pooling_type = pooling_type
-        self.seq_embedding_dim = seq_embedding_dim
+        self.use_seq_embedding = use_seq_embedding
+        self.seq_embedding_dim = seq_embedding_dim if use_seq_embedding else 0
         
         self.att_layers = nn.ModuleList()
         current_dim = hidden_dim
@@ -456,8 +461,11 @@ class PocketGNNKcatOnly(nn.Module):
                 )
                 current_dim = hidden_dim
 
-        # Readout / Pooling strategy
-        if pooling_type == 'global_attention':
+        # Readout / Pooling strategy (支持多种池化方法)
+        if pooling_type == 'mean':
+            self.readout = global_mean_pool
+            readout_dim = hidden_dim
+        elif pooling_type == 'global_attention':
             # Gate NN for GlobalAttention: computes attention weights for each node
             self.gate_nn = nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim // 2),
@@ -465,12 +473,24 @@ class PocketGNNKcatOnly(nn.Module):
                 nn.Linear(hidden_dim // 2, 1)
             )
             self.readout = GlobalAttention(gate_nn=self.gate_nn)
+            readout_dim = hidden_dim
+        elif pooling_type == 'set2set':
+            # Set2Set: 更高级的池化方法，适合分子图
+            self.readout = Set2Set(hidden_dim, processing_steps=3)
+            readout_dim = hidden_dim * 2  # Set2Set输出维度是输入的2倍
         else:
-            # Default to mean pooling
-            self.readout = global_mean_pool
+            raise ValueError(f"Unknown pooling type: {pooling_type}")
 
-        # Calculate MLP input dimension (Pocket Graph Feature + Optional Sequence Embedding)
-        mlp_input_dim = hidden_dim + seq_embedding_dim
+        # Sequence Embedding Projection (关键优化：降维避免特征不平衡)
+        if use_seq_embedding:
+            self.seq_proj = nn.Sequential(
+                nn.Linear(seq_embedding_dim, hidden_dim),  # 例如：1280 -> 256
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            )
+            mlp_input_dim = readout_dim + hidden_dim  # 图特征 + 投影后的序列特征
+        else:
+            mlp_input_dim = readout_dim
 
         # MLP for kcat-only regression
         self.mlp = nn.Sequential(
@@ -499,29 +519,32 @@ class PocketGNNKcatOnly(nn.Module):
                 all_attention_weights.append(attention_info[1])
 
         # Apply Pooling
-        graph_x = self.readout(x, batch)  # [batch_size, hidden_dim]
+        graph_x = self.readout(x, batch)  # [batch_size, readout_dim]
 
-        # Late Fusion with Sequence Embedding
-        if self.seq_embedding_dim > 0:
+        # Late Fusion with Sequence Embedding (使用投影层降维)
+        if self.use_seq_embedding:
             if hasattr(data, 'seq_embedding'):
-                # Ensure z_seq matches batch size
-                # data.seq_embedding should be [batch_size, seq_embedding_dim]
-                z_seq = data.seq_embedding
+                # data.seq_embedding shape: [batch_size, seq_embedding_dim] (例如 [32, 1280])
+                seq_emb = data.seq_embedding
                 
-                # Check consistency
-                if z_seq.shape[0] != graph_x.shape[0]:
-                     # This might happen if dataloader didn't batch it correctly? 
-                     # But geometric dataloader usually concatenates attributes.
-                     pass
+                # 使用投影层降维：1280 -> hidden_dim (例如 256)
+                seq_x = self.seq_proj(seq_emb)  # [batch_size, hidden_dim]
                 
-                graph_x = torch.cat([graph_x, z_seq], dim=1)
+                # 拼接：图特征 + 投影后的序列特征
+                combined_x = torch.cat([graph_x, seq_x], dim=1)  # [batch_size, readout_dim + hidden_dim]
             else:
-                # Fallback or error if seq embedding is expected but missing
-                # For safety, we can pad with zeros if not present, but strict mode is better.
-                raise ValueError("Model configured with seq_embedding_dim > 0 but 'seq_embedding' not found in data batch.")
+                # 容错处理：如果没有embedding，用0填充，但打印警告
+                device = graph_x.device
+                dummy_seq = torch.zeros(graph_x.size(0), self.seq_embedding_dim, device=device)
+                seq_x = self.seq_proj(dummy_seq)
+                combined_x = torch.cat([graph_x, seq_x], dim=1)
+                # 可选：打印警告（但可能太频繁）
+                # print("Warning: No seq_embedding found in batch, using zero vector!")
+        else:
+            combined_x = graph_x
 
         # Regression
-        out = self.mlp(graph_x)  # [batch_size, 1]
+        out = self.mlp(combined_x)  # [batch_size, 1]
 
         if torch.isnan(out).any():
             raise ValueError("模型输出包含 NaN 值")

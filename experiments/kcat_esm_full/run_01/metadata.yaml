@@ -1,0 +1,47 @@
+batch_size: 32
+best_val_loss: !!python/object/apply:numpy.core.multiarray.scalar
+- &id001 !!python/object/apply:numpy.dtype
+  args:
+  - f8
+  - false
+  - true
+  state: !!python/tuple
+  - 3
+  - <
+  - null
+  - null
+  - null
+  - -1
+  - -1
+  - 0
+- !!binary |
+  lNdQPilY2T8=
+dataset_path: data/processed/kcat_full_1213.pt
+device: cuda:0
+edge_input_dim: 24
+end_time: '2025-12-14T12:18:17.282843'
+exp_name: kcat_esm_full
+final_pearson: !!python/object/apply:numpy.core.multiarray.scalar
+- *id001
+- !!binary |
+  xeaZINnP6j8=
+final_r2: 0.6965689659118652
+git_commit: 2aaf6d5
+graph_builder_version: enhanced_builder
+loss_type: mse
+lr: 0.001
+max_epochs: 500
+model_dropout: 0.2
+model_heads: 4
+model_hidden_dim: 128
+model_num_layers: 3
+model_version: PocketGNNKcatOnly
+node_input_dim: 52
+note: 'Enhanced: pooling=set2set, seq_emb=True, loss=mse, wd=0.0001'
+pooling_type: set2set
+run_id: run_01
+save_dir: outputs/kcat_enhanced_run
+start_time: '2025-12-14T11:51:31.823985'
+status: completed
+use_seq_embedding: true
+weight_decay: 0.0001

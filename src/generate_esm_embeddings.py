@@ -158,15 +158,17 @@ def generate_embeddings(csv_path, output_path, model_name="esm2_t33_150M_UR50D",
         raise ValueError("CSV must contain 'protein_sequence' or 'sequence' column")
     
     # Determine ID column
+    # 优先级：sample_id > uniprot > pdb_id > uniprot_id
+    # sample_id 优先级最高，因为训练和测试时都使用 sample_id 进行匹配
     id_col = None
-    if 'uniprot' in df.columns:
+    if 'sample_id' in df.columns:
+        id_col = 'sample_id'
+    elif 'uniprot' in df.columns:
         id_col = 'uniprot'
     elif 'pdb_id' in df.columns:
         id_col = 'pdb_id'
     elif 'uniprot_id' in df.columns:
         id_col = 'uniprot_id'
-    elif 'sample_id' in df.columns:
-        id_col = 'sample_id'
     else:
         print("Warning: No identifier column found. Using index as ID.")
         id_col = 'index'
@@ -252,7 +254,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate ESM-2 embeddings for dataset")
     parser.add_argument("--csv", type=str, required=True, help="Path to input CSV file")
     parser.add_argument("--output", type=str, default="data/esm_embeddings.pt", help="Path to output .pt file")
-    parser.add_argument("--model", type=str, default="esm2_t33_150M_UR50D", 
+    parser.add_argument("--model", type=str, default="facebook/esm2_t30_150M_UR50D", 
                        help="ESM-2 model name. 支持两种格式:\n"
                             "  1. esm库格式: esm2_t33_150M_UR50D\n"
                             "  2. HuggingFace格式: facebook/esm2_t30_150M_UR50D (推荐，更可靠)\n"
