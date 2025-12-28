@@ -485,6 +485,7 @@ class PocketGNNKcatOnly(nn.Module):
         if use_seq_embedding:
             self.seq_proj = nn.Sequential(
                 nn.Linear(seq_embedding_dim, hidden_dim),  # 例如：1280 -> 256
+                nn.LayerNorm(hidden_dim),  # ⚡ Added LayerNorm
                 nn.ReLU(),
                 nn.Dropout(dropout)
             )
@@ -494,6 +495,7 @@ class PocketGNNKcatOnly(nn.Module):
 
         # MLP for kcat-only regression
         self.mlp = nn.Sequential(
+            nn.BatchNorm1d(mlp_input_dim),  # ⚡ Added BatchNorm1d before MLP
             nn.Linear(mlp_input_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
