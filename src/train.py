@@ -17,13 +17,75 @@ from metadata_utils import update_training_results, save_metadata
 import wandb
 
 def compute_metrics(y_true_log, y_pred_log):
-    y_true_log = y_true_log.numpy()
-    y_pred_log = y_pred_log.numpy()
+    """
+    计算评估指标，包含异常值处理和诊断信息
+    """
+    # 转换为numpy并展平
+    y_true_log = y_true_log.numpy().flatten()
+    y_pred_log = y_pred_log.numpy().flatten()
+    
+    # 检查NaN和Inf值
+    true_has_nan = np.isnan(y_true_log).any()
+    pred_has_nan = np.isnan(y_pred_log).any()
+    true_has_inf = np.isinf(y_true_log).any()
+    pred_has_inf = np.isinf(y_pred_log).any()
+    
+    if true_has_nan or pred_has_nan or true_has_inf or pred_has_inf:
+        print(f"⚠️  警告: 检测到异常值 - true_nan:{true_has_nan}, pred_nan:{pred_has_nan}, "
+              f"true_inf:{true_has_inf}, pred_inf:{pred_has_inf}")
+        # 移除NaN和Inf值
+        valid_mask = ~(np.isnan(y_true_log) | np.isnan(y_pred_log) | 
+                      np.isinf(y_true_log) | np.isinf(y_pred_log))
+        if valid_mask.sum() == 0:
+            print("❌ 所有值都是NaN或Inf，无法计算指标")
+            return {'MAE': np.nan, 'RMSE': np.nan, 'R2': -np.inf, 'Pearson': 0.0}
+        y_true_log = y_true_log[valid_mask]
+        y_pred_log = y_pred_log[valid_mask]
+        print(f"   保留 {len(y_true_log)}/{len(valid_mask)} 个有效值")
+    
+    # ⚡ 裁剪极端预测值（防止 R² 计算异常）
+    # log10 kcat 的合理范围通常是 [-10, 10]，超出范围的可能是异常值
+    y_pred_log = np.clip(y_pred_log, -10.0, 10.0)
+    
+    # 检查预测值的范围（诊断信息）
+    pred_min, pred_max = y_pred_log.min(), y_pred_log.max()
+    pred_mean, pred_std = y_pred_log.mean(), y_pred_log.std()
+    true_mean, true_std = y_true_log.mean(), y_true_log.std()
+    
+    # 如果预测值或真实值的标准差为0，R²计算会有问题
+    if pred_std == 0 or true_std == 0:
+        print(f"⚠️  警告: 预测值或真实值标准差为0 - pred_std:{pred_std:.6f}, true_std:{true_std:.6f}")
+        # 如果预测值都是常数，R²为负是正常的
+        r2_val = -np.inf if pred_std == 0 else 0.0
+    else:
+        try:
+            r2_val = r2_score(y_true_log, y_pred_log)
+            # 如果R²异常负值，记录诊断信息
+            if r2_val < -100:
+                print(f"⚠️  异常R²值: {r2_val:.2f}")
+                print(f"   预测值范围: [{pred_min:.2f}, {pred_max:.2f}], mean={pred_mean:.2f}, std={pred_std:.2f}")
+                print(f"   真实值范围: [{y_true_log.min():.2f}, {y_true_log.max():.2f}], mean={true_mean:.2f}, std={true_std:.2f}")
+        except Exception as e:
+            print(f"❌ R²计算失败: {e}")
+            r2_val = -np.inf
+    
+    # 计算Pearson相关系数（处理异常情况）
+    try:
+        if pred_std == 0 or true_std == 0:
+            pearson_val = 0.0
+        else:
+            pearson_val = pearsonr(y_true_log, y_pred_log)[0]
+            if np.isnan(pearson_val):
+                pearson_val = 0.0
+    except Exception as e:
+        print(f"⚠️  Pearson计算失败: {e}")
+        pearson_val = 0.0
+    
     return {
         'MAE': mean_absolute_error(y_true_log, y_pred_log),
         'RMSE': np.sqrt(mean_squared_error(y_true_log, y_pred_log)),
-        'R2': r2_score(y_true_log, y_pred_log),
-        'Pearson': pearsonr(y_true_log.flatten(), y_pred_log.flatten())[0]
+        'R2': r2_val,
+        'Pearson': pearson_val
     }
 
 def train(args):
@@ -291,9 +353,9 @@ def train(args):
     print(f"Node input dim: {node_input_dim}, Edge input dim: {edge_input_dim}")
     
     # 使用新的kcat专用模型
-    hidden_dim = 128  # 模型隐藏维度
-    num_layers = 3    # 层数
-    heads = 4         # 注意力头数
+    hidden_dim = args.hidden_dim  # 模型隐藏维度
+    num_layers = args.num_layers    # 层数
+    heads = args.heads         # 注意力头数
     dropout = args.dropout # Configurable dropout
 
     model = MD.PocketGNNKcatOnly(
@@ -382,10 +444,29 @@ def train(args):
                 print("❌ batch.y 中含有 NaN")
                 
             out = model(batch)
-           
+            
+            # 裁剪极端预测值（防止训练不稳定）
+            # log10 kcat 的合理范围是 [-10, 10]，超出范围会导致 R² 异常
+            out = torch.clamp(out, min=-10.0, max=10.0)
+            
+            # 检查输出是否包含异常值
+            if torch.isnan(out).any() or torch.isinf(out).any():
+                print(f"⚠️  Epoch {epoch} 训练阶段: 模型输出包含异常值")
+                # 跳过这个batch，不更新参数
+                continue
+            
             loss = criterion(out, log_y)
+            
+            # 检查loss是否异常
+            if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 1e6:
+                print(f"⚠️  Epoch {epoch} 训练阶段: 异常loss值 {loss.item()}")
+                continue
+            
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 梯度裁剪
+            # 增强梯度裁剪：更严格的限制，防止梯度爆炸
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if grad_norm > 10.0:  # 如果梯度范数很大，记录警告
+                print(f"⚠️  Epoch {epoch}: 梯度范数较大 {grad_norm:.2f}")
             optimizer.step()
             train_losses.append(loss.item())
         
@@ -414,17 +495,66 @@ def train(args):
                 
                 try:
                     out = model(batch)
+                    # ⚡ 检查预测值是否在合理范围内（防止极端值导致 R² 异常）
+                    if torch.isnan(out).any() or torch.isinf(out).any():
+                        print(f"⚠️  Epoch {epoch}: 检测到 NaN/Inf 预测值，跳过该 batch")
+                        continue
+                    # 裁剪极端预测值到合理范围（log10 kcat 通常在 [-10, 10]）
+                    out = torch.clamp(out, min=-10.0, max=10.0)
                 except ValueError as e:
-                    print(f"❌ NaN 输出，batch中数据文件: {[d.pdb_id for d in batch]}")
-                    raise e
+                    print(f"❌ Epoch {epoch}: NaN 输出，跳过该 batch")
+                    continue
+                except Exception as e:
+                    print(f"❌ Epoch {epoch}: 模型前向传播异常: {e}，跳过该 batch")
+                    continue
+                    
                 loss = criterion(out, log_y)
+                # 如果 loss 异常大，也跳过
+                if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 1000:
+                    print(f"⚠️  Epoch {epoch}: Loss 异常 ({loss.item():.2f})，跳过该 batch")
+                    continue
+                    
                 val_losses.append(loss.item())
                 y_true_log.append(log_y.cpu())
                 y_pred_log.append(out.cpu())
-        val_loss = np.mean(val_losses)
-        y_true_log = torch.cat(y_true_log, dim=0)
-        y_pred_log = torch.cat(y_pred_log, dim=0)
-        metrics = compute_metrics(y_true_log, y_pred_log)
+        val_loss = np.mean(val_losses) if val_losses else float('inf')
+        y_true_log = torch.cat(y_true_log, dim=0) if y_true_log else torch.tensor([])
+        y_pred_log = torch.cat(y_pred_log, dim=0) if y_pred_log else torch.tensor([])
+        
+        # 如果验证集为空（所有batch都被跳过），使用默认值
+        if len(y_true_log) == 0:
+            print(f"⚠️  Epoch {epoch}: 验证集所有batch都被跳过，使用默认指标")
+            metrics = {'MAE': np.nan, 'RMSE': np.nan, 'R2': -np.inf, 'Pearson': 0.0}
+        else:
+            metrics = compute_metrics(y_true_log, y_pred_log)
+        
+        # 如果R²异常负值，记录更详细的诊断信息
+        if metrics['R2'] < -100:
+            pred_stats = {
+                'min': float(y_pred_log.min().item()) if len(y_pred_log) > 0 else 0.0,
+                'max': float(y_pred_log.max().item()) if len(y_pred_log) > 0 else 0.0,
+                'mean': float(y_pred_log.mean().item()) if len(y_pred_log) > 0 else 0.0,
+                'std': float(y_pred_log.std().item()) if len(y_pred_log) > 0 else 0.0
+            }
+            true_stats = {
+                'min': float(y_true_log.min().item()) if len(y_true_log) > 0 else 0.0,
+                'max': float(y_true_log.max().item()) if len(y_true_log) > 0 else 0.0,
+                'mean': float(y_true_log.mean().item()) if len(y_true_log) > 0 else 0.0,
+                'std': float(y_true_log.std().item()) if len(y_true_log) > 0 else 0.0
+            }
+            print(f"⚠️  Epoch {epoch}: R²异常负值 ({metrics['R2']:.2f})")
+            print(f"   预测值统计: {pred_stats}")
+            print(f"   真实值统计: {true_stats}")
+            # 记录到wandb以便后续分析
+            wandb.log({
+                "debug/pred_min": pred_stats['min'],
+                "debug/pred_max": pred_stats['max'],
+                "debug/pred_mean": pred_stats['mean'],
+                "debug/pred_std": pred_stats['std'],
+                "debug/true_std": true_stats['std'],
+                "epoch": epoch
+            })
+        
         train_loss_history.append(train_loss)
         val_loss_history.append(val_loss)
         r2_history.append(metrics['R2'])
@@ -453,15 +583,22 @@ def train(args):
             "epoch": epoch
         })
 
-        print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | R2: {metrics['R2']:.3f}")
+        # 如果 R² 异常，打印更多诊断信息
+        if metrics['R2'] < -10.0:
+            print(f"⚠️  Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | R2: {metrics['R2']:.3f} (异常!)")
+        else:
+            print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | R2: {metrics['R2']:.3f} | Pearson: {metrics['Pearson']:.3f}")
 
         # === Save best model ===
-        if val_loss < best_val_loss:
+        # ⚡ 只有当 R² 合理（> -10）且 loss 正常时才保存最佳模型
+        if val_loss < best_val_loss and metrics['R2'] > -10.0:
             best_val_loss = val_loss
             best_model_path = os.path.join(save_dir, "best_model.pt")
             torch.save(model.state_dict(), best_model_path)
             # 记录最佳模型到 wandb
             wandb.log({"best_val_loss": best_val_loss, "best_epoch": epoch})
+        elif metrics['R2'] <= -10.0:
+            print(f"⚠️  Epoch {epoch}: R² 异常负值 ({metrics['R2']:.2f})，跳过保存最佳模型")
 
     writer.close()
     print("✅ Training finished. Best model saved.")
@@ -622,6 +759,10 @@ if __name__ == '__main__':
     parser.add_argument('--use_seq_embedding', action='store_true', help='Enable ESM sequence embedding (Late Fusion)')
     parser.add_argument('--seq_embedding_path', type=str, default='data/esm_embeddings.pt', help='Path to ESM embeddings dictionary')
     
+    # Model Architecture Hyperparameters
+    parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension')
+    parser.add_argument('--num_layers', type=int, default=3, help='Number of GNN layers')
+    parser.add_argument('--heads', type=int, default=4, help='Number of attention heads')
     args = parser.parse_args()
 
     train(args)

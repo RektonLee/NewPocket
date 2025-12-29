@@ -494,8 +494,9 @@ class PocketGNNKcatOnly(nn.Module):
             mlp_input_dim = readout_dim
 
         # MLP for kcat-only regression
+        # ⚡ 使用 LayerNorm 替代 BatchNorm，更稳定（不依赖 batch 统计量）
         self.mlp = nn.Sequential(
-            nn.BatchNorm1d(mlp_input_dim),  # ⚡ Added BatchNorm1d before MLP
+            nn.LayerNorm(mlp_input_dim),  # 更稳定的归一化方式
             nn.Linear(mlp_input_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
