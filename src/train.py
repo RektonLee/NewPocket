@@ -97,13 +97,14 @@ def train(args):
     
     # Check if we should override defaults with args
     if hasattr(args, 'batch_size'): batch_size = args.batch_size
-    if hasattr(args, 'lr'): 
+    if args.lr is not None:
         lr = args.lr
     else:
         # ⚡ 如果没有指定 lr，根据模型大小自动调整
         # 大模型（hidden_dim >= 256）使用更小的默认学习率
         if hasattr(args, 'hidden_dim') and args.hidden_dim >= 256:
             lr = 5e-4
+        # 否则使用默认的 1e-3（已经在上面定义了）
     if hasattr(args, 'epochs'): max_epochs = args.epochs
     
     # ========== 实验命名和目录管理 ==========
@@ -754,6 +755,7 @@ if __name__ == '__main__':
                        help='Experiment name (e.g., "kcat_attn_v1"). Used for experiments/ and wandb run naming.')
     
     # Phase 1: Training & Regularization
+    parser.add_argument('--lr', type=float, default=None, help='Learning rate (default: auto-adjusted based on model size)')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='L2 regularization')
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
     parser.add_argument('--loss', type=str, default='mse', choices=['mse', 'huber'], help='Loss function')
