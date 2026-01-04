@@ -92,12 +92,18 @@ def train(args):
     dataset_path = args.dataset
     save_dir = args.save_dir
     batch_size = 32 # defaults if not in args, but usually controlled by loop or constant
-    lr = 1e-3
+    lr = 5e-4  # ⚡ 对于大模型，使用更小的学习率
     max_epochs = 500
     
     # Check if we should override defaults with args
     if hasattr(args, 'batch_size'): batch_size = args.batch_size
-    if hasattr(args, 'lr'): lr = args.lr
+    if hasattr(args, 'lr'): 
+        lr = args.lr
+    else:
+        # ⚡ 如果没有指定 lr，根据模型大小自动调整
+        # 大模型（hidden_dim >= 256）使用更小的默认学习率
+        if hasattr(args, 'hidden_dim') and args.hidden_dim >= 256:
+            lr = 5e-4
     if hasattr(args, 'epochs'): max_epochs = args.epochs
     
     # ========== 实验命名和目录管理 ==========
@@ -464,9 +470,10 @@ def train(args):
             
             loss.backward()
             # 增强梯度裁剪：更严格的限制，防止梯度爆炸
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            if grad_norm > 10.0:  # 如果梯度范数很大，记录警告
-                print(f"⚠️  Epoch {epoch}: 梯度范数较大 {grad_norm:.2f}")
+            # ⚡ 对于大模型，使用更小的 max_norm
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            if grad_norm > 5.0:  # 如果梯度范数很大，记录警告
+                print(f"⚠️  Epoch {epoch}: 梯度范数较大 {grad_norm:.2f} (已裁剪到 0.5)")
             optimizer.step()
             train_losses.append(loss.item())
         
