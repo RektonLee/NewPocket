@@ -6,6 +6,7 @@ import numpy as np
 from torch_geometric.loader import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import GNN_model as MD
+from quantile_loss import quantile_loss, compute_quantile_metrics
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from scipy.stats import pearsonr
 import matplotlib
@@ -365,6 +366,14 @@ def train(args):
     heads = args.heads         # 注意力头数
     dropout = args.dropout # Configurable dropout
 
+    # 解析quantile levels
+    use_quantile = (args.loss == 'quantile')
+    if use_quantile:
+        quantiles = [float(q) for q in args.quantiles.split(',')]
+        print(f"Using Quantile Regression with quantiles: {quantiles}")
+    else:
+        quantiles = None
+    
     model = MD.PocketGNNKcatOnly(
         node_input_dim=node_input_dim,
         edge_input_dim=edge_input_dim,
@@ -374,7 +383,8 @@ def train(args):
         dropout=dropout,
         pooling_type=args.pooling_type,
         use_seq_embedding=args.use_seq_embedding,
-        seq_embedding_dim=seq_embedding_dim if args.use_seq_embedding else 0
+        seq_embedding_dim=seq_embedding_dim if args.use_seq_embedding else 0,
+        output_quantiles=use_quantile
     ).to(device)
     
     # === Phase 1: Optimizer & Loss & Scheduler ===
@@ -382,6 +392,8 @@ def train(args):
     
     if args.loss == 'huber':
         criterion = nn.HuberLoss(delta=1.0)
+    elif args.loss == 'quantile':
+        criterion = None  # 使用自定义的quantile_loss函数
     else:
         criterion = nn.MSELoss()
         
@@ -462,7 +474,11 @@ def train(args):
                 # 跳过这个batch，不更新参数
                 continue
             
-            loss = criterion(out, log_y)
+            # 计算loss
+            if use_quantile:
+                loss = quantile_loss(out, log_y, quantiles=quantiles)
+            else:
+                loss = criterion(out, log_y)
             
             # 检查loss是否异常
             if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 1e6:
@@ -516,7 +532,12 @@ def train(args):
                     print(f"❌ Epoch {epoch}: 模型前向传播异常: {e}，跳过该 batch")
                     continue
                     
-                loss = criterion(out, log_y)
+                # 计算loss
+                if use_quantile:
+                    loss = quantile_loss(out, log_y, quantiles=quantiles)
+                else:
+                    loss = criterion(out, log_y)
+                    
                 # 如果 loss 异常大，也跳过
                 if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 1000:
                     print(f"⚠️  Epoch {epoch}: Loss 异常 ({loss.item():.2f})，跳过该 batch")
@@ -532,9 +553,21 @@ def train(args):
         # 如果验证集为空（所有batch都被跳过），使用默认值
         if len(y_true_log) == 0:
             print(f"⚠️  Epoch {epoch}: 验证集所有batch都被跳过，使用默认指标")
-            metrics = {'MAE': np.nan, 'RMSE': np.nan, 'R2': -np.inf, 'Pearson': 0.0}
+            if use_quantile:
+                metrics = {'MAE': np.nan, 'RMSE': np.nan, 'R2': -np.inf, 'Pearson': 0.0, 
+                          'coverage': 0.0, 'interval_width': np.nan}
+            else:
+                metrics = {'MAE': np.nan, 'RMSE': np.nan, 'R2': -np.inf, 'Pearson': 0.0}
         else:
-            metrics = compute_metrics(y_true_log, y_pred_log)
+            if use_quantile:
+                # 使用quantile metrics
+                quantile_metrics = compute_quantile_metrics(y_pred_log, y_true_log, quantiles=quantiles)
+                # 对于quantile，使用中位数预测来计算传统指标
+                y_pred_median = y_pred_log[:, 1:2]  # 取中位数（第2列）
+                standard_metrics = compute_metrics(y_true_log, y_pred_median)
+                metrics = {**standard_metrics, **quantile_metrics}
+            else:
+                metrics = compute_metrics(y_true_log, y_pred_log)
         
         # 如果R²异常负值，记录更详细的诊断信息
         if metrics['R2'] < -100:
@@ -581,7 +614,7 @@ def train(args):
         writer.add_scalar("Pearson/val", metrics['Pearson'], epoch)
         
         # 记录到 wandb
-        wandb.log({
+        log_dict = {
             "Loss/train": train_loss,
             "Loss/val": val_loss,
             "R2/val": metrics['R2'],
@@ -589,13 +622,23 @@ def train(args):
             "MAE/val": metrics['MAE'],
             "RMSE/val": metrics['RMSE'],
             "epoch": epoch
-        })
+        }
+        # 如果是quantile模式，添加额外的指标
+        if use_quantile:
+            log_dict.update({
+                "Coverage/val": metrics.get('coverage', 0.0),
+                "IntervalWidth/val": metrics.get('interval_width', np.nan)
+            })
+        wandb.log(log_dict)
 
         # 如果 R² 异常，打印更多诊断信息
         if metrics['R2'] < -10.0:
             print(f"⚠️  Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | R2: {metrics['R2']:.3f} (异常!)")
         else:
-            print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | R2: {metrics['R2']:.3f} | Pearson: {metrics['Pearson']:.3f}")
+            if use_quantile:
+                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | R2: {metrics['R2']:.3f} | Pearson: {metrics['Pearson']:.3f} | Coverage: {metrics.get('coverage', 0.0):.3f}")
+            else:
+                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | R2: {metrics['R2']:.3f} | Pearson: {metrics['Pearson']:.3f}")
 
         # === Save best model ===
         # ⚡ 只有当 R² 合理（> -10）且 loss 正常时才保存最佳模型
@@ -669,24 +712,80 @@ def train(args):
     all_y_pred = torch.cat(all_y_pred, dim=0).numpy()
     
     # 计算最终指标（在绘制图像之前）
-    r2_kcat = r2_score(all_y_true.flatten(), all_y_pred.flatten())
-    pearson_end = pearsonr(all_y_true.flatten(), all_y_pred.flatten())[0]
-    
-    # 绘制kcat散点图（只有一个图）
-    plt.figure(figsize=(8, 6))
-    
-    # kcat散点图
-    plt.scatter(all_y_true.flatten(), all_y_pred.flatten(), alpha=0.6)
-    plt.plot([all_y_true.min(), all_y_true.max()], 
-             [all_y_true.min(), all_y_true.max()], 'r--')
-    plt.xlabel('True kcat (log10)')
-    plt.ylabel('Predicted kcat (log10)')
-    plt.title(f'kcat: True vs Predicted (R² = {r2_kcat:.3f})')
-    plt.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'kcat_prediction_scatter.png'))
-    plt.close()
+    if use_quantile:
+        # 使用中位数预测计算传统指标
+        y_pred_median = all_y_pred[:, 1:2].flatten()  # 中位数（第2列）
+        r2_kcat = r2_score(all_y_true.flatten(), y_pred_median)
+        pearson_end = pearsonr(all_y_true.flatten(), y_pred_median)[0]
+        
+        # Quantile metrics
+        quantile_metrics_end = compute_quantile_metrics(
+            torch.tensor(all_y_pred), 
+            torch.tensor(all_y_true), 
+            quantiles=quantiles
+        )
+        
+        # 绘制带置信区间的散点图
+        plt.figure(figsize=(10, 8))
+        y_true_flat = all_y_true.flatten()
+        y_pred_low = all_y_pred[:, 0]   # 5% 分位数
+        y_pred_median = all_y_pred[:, 1]  # 50% 分位数
+        y_pred_high = all_y_pred[:, 2]  # 95% 分位数
+        
+        # 按真实值排序以便绘制区间
+        sort_idx = np.argsort(y_true_flat)
+        y_true_sorted = y_true_flat[sort_idx]
+        y_pred_low_sorted = y_pred_low[sort_idx]
+        y_pred_median_sorted = y_pred_median[sort_idx]
+        y_pred_high_sorted = y_pred_high[sort_idx]
+        
+        # 绘制置信区间（阴影区域）
+        plt.fill_between(y_true_sorted, y_pred_low_sorted, y_pred_high_sorted, 
+                        alpha=0.3, color='blue', label=f'95% Confidence Interval')
+        
+        # 绘制中位数预测
+        plt.scatter(y_true_flat, y_pred_median, alpha=0.6, s=15, label='Median Prediction')
+        
+        # 绘制完美预测线
+        plt.plot([y_true_flat.min(), y_true_flat.max()], 
+                 [y_true_flat.min(), y_true_flat.max()], 'r--', lw=2, label='Perfect')
+        
+        plt.xlabel('True kcat (log10)')
+        plt.ylabel('Predicted kcat (log10)')
+        plt.title(f'kcat Prediction with 95% CI\nR²={r2_kcat:.3f}, Coverage={quantile_metrics_end["coverage"]:.3f}')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'kcat_prediction_with_ci.png'), dpi=150)
+        plt.close()
+        
+        # 也保存传统散点图（仅中位数）
+        plt.figure(figsize=(8, 6))
+        plt.scatter(y_true_flat, y_pred_median, alpha=0.6)
+        plt.plot([y_true_flat.min(), y_true_flat.max()], 
+                 [y_true_flat.min(), y_true_flat.max()], 'r--')
+        plt.xlabel('True kcat (log10)')
+        plt.ylabel('Predicted kcat (log10)')
+        plt.title(f'kcat: True vs Predicted (Median, R² = {r2_kcat:.3f})')
+        plt.grid(True, alpha=0.3)
+        plt.savefig(os.path.join(save_dir, 'kcat_prediction_scatter.png'))
+        plt.close()
+    else:
+        r2_kcat = r2_score(all_y_true.flatten(), all_y_pred.flatten())
+        pearson_end = pearsonr(all_y_true.flatten(), all_y_pred.flatten())[0]
+        
+        # 绘制kcat散点图（只有一个图）
+        plt.figure(figsize=(8, 6))
+        plt.scatter(all_y_true.flatten(), all_y_pred.flatten(), alpha=0.6)
+        plt.plot([all_y_true.min(), all_y_true.max()], 
+                 [all_y_true.min(), all_y_true.max()], 'r--')
+        plt.xlabel('True kcat (log10)')
+        plt.ylabel('Predicted kcat (log10)')
+        plt.title(f'kcat: True vs Predicted (R² = {r2_kcat:.3f})')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'kcat_prediction_scatter.png'))
+        plt.close()
     
     # 4. kcat密度图
     plt.figure(figsize=(8, 7))
@@ -712,11 +811,17 @@ def train(args):
     metrics_df.to_csv(os.path.join(save_dir, 'training_metrics.csv'), index=False)
     
     # 记录最终指标到 wandb（在计算完 r2_kcat 和 pearson_end 之后）
-    wandb.log({
+    final_log = {
         "final/best_val_loss": best_val_loss,
         "final/r2": r2_kcat,
         "final/pearson": pearson_end
-    })
+    }
+    if use_quantile:
+        final_log.update({
+            "final/coverage": quantile_metrics_end['coverage'],
+            "final/interval_width": quantile_metrics_end['interval_width']
+        })
+    wandb.log(final_log)
     
     # 上传最终图像到 wandb（可选）
     if os.path.exists(os.path.join(save_dir, 'kcat_prediction_scatter.png')):
@@ -758,7 +863,8 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=None, help='Learning rate (default: auto-adjusted based on model size)')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='L2 regularization')
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
-    parser.add_argument('--loss', type=str, default='mse', choices=['mse', 'huber'], help='Loss function')
+    parser.add_argument('--loss', type=str, default='mse', choices=['mse', 'huber', 'quantile'], help='Loss function (quantile for uncertainty quantification)')
+    parser.add_argument('--quantiles', type=str, default='0.05,0.5,0.95', help='Quantile levels for quantile loss (comma-separated, e.g., 0.05,0.5,0.95)')
     parser.add_argument('--scheduler', type=str, default='none', choices=['none', 'plateau', 'cosine'], help='LR Scheduler')
     
     # Phase 2: Pooling

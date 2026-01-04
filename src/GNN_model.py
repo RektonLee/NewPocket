@@ -437,7 +437,7 @@ class PocketGNNKcatOnly(nn.Module):
     - 支持Set2Set池化（更高级的池化方法）
     """
     def __init__(self, node_input_dim, edge_input_dim, hidden_dim=256, num_layers=6, heads=8, dropout=0.1, concat_heads=True, 
-                 pooling_type='mean', use_seq_embedding=False, seq_embedding_dim=1280):
+                 pooling_type='mean', use_seq_embedding=False, seq_embedding_dim=1280, output_quantiles=False):
         super().__init__()
         self.node_encoder = nn.Linear(node_input_dim, hidden_dim)
         
@@ -445,6 +445,7 @@ class PocketGNNKcatOnly(nn.Module):
         self.pooling_type = pooling_type
         self.use_seq_embedding = use_seq_embedding
         self.seq_embedding_dim = seq_embedding_dim if use_seq_embedding else 0
+        self.output_quantiles = output_quantiles  # 是否输出分位数
         
         self.att_layers = nn.ModuleList()
         current_dim = hidden_dim
@@ -503,7 +504,7 @@ class PocketGNNKcatOnly(nn.Module):
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1)  # 只输出 kcat
+            nn.Linear(hidden_dim // 2, 3 if output_quantiles else 1)  # 输出3个分位数或1个点预测
         )
 
     def forward(self, data, return_attention_weights=False):
