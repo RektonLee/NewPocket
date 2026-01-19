@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-def quantile_loss(pred, target, quantiles=[0.05, 0.5, 0.95]):
+def quantile_loss(pred, target, quantiles=[0.05, 0.5, 0.95], weights=None):
     """
     Quantile Loss (Pinball Loss) for uncertainty quantification
     
@@ -10,6 +10,9 @@ def quantile_loss(pred, target, quantiles=[0.05, 0.5, 0.95]):
         pred: [batch_size, num_quantiles] - 预测的分位数值
         target: [batch_size, 1] - 真实值
         quantiles: list of quantile levels (e.g., [0.05, 0.5, 0.95] for 5%, median, 95%)
+        weights: optional list of weights for each quantile (default: None, equal weights)
+                 If provided, should have same length as quantiles.
+                 Example: [0.2, 0.6, 0.2] to emphasize median prediction
     
     Returns:
         loss: scalar tensor
@@ -23,8 +26,15 @@ def quantile_loss(pred, target, quantiles=[0.05, 0.5, 0.95]):
         loss_q = torch.max(q * errors[:, i], (q - 1) * errors[:, i])
         losses.append(loss_q)
     
-    # 总loss = 所有分位数loss的平均
-    total_loss = torch.stack(losses).mean()
+    # 应用权重（如果提供）
+    if weights is not None:
+        assert len(weights) == len(quantiles), "Weights must have same length as quantiles"
+        weights_tensor = torch.tensor(weights, device=losses[0].device, dtype=losses[0].dtype)
+        weighted_losses = [losses[i] * weights_tensor[i] for i in range(len(losses))]
+        total_loss = torch.stack(weighted_losses).sum() / weights_tensor.sum()
+    else:
+        # 总loss = 所有分位数loss的平均
+        total_loss = torch.stack(losses).mean()
     
     return total_loss
 
@@ -63,4 +73,6 @@ def compute_quantile_metrics(pred_quantiles, target, quantiles=[0.05, 0.5, 0.95]
         'q_low_mean': q_low.mean(),
         'q_high_mean': q_high.mean()
     }
+
+
 

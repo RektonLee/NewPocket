@@ -52,6 +52,8 @@
         3.  解析 PDB，调用 `enhanced_build_graph` 构建图数据。
         4.  计算 24维边特征（RBF + Angle + Dihedral）。
     -   **输出**：`.pt` 文件（List of Data objects）。
+    
+    **注意**：Pocket PDB 文件的生成依赖于 `src/docking.py` 中的分子对接流程。当前版本（`diffdock-integration` 分支）使用 **DiffDock** 进行分子对接，替代了原来的 AutoDock Vina。
 
 2.  **模型训练 (Training)**
     -   **脚本**：`src/train.py`
@@ -116,7 +118,7 @@
 | `src/build_graph_dataset.py` | **Data** | 构建训练用的 `.pt` 数据集。实现了增强图构建逻辑。 | ✅ Active |
 | `src/graph_builder_rbf.py` | **Utils** | 基础图构建工具，定义了 RBF 参数和基础构图逻辑。 | ✅ Active |
 | `src/pred_range_fixed.py` | **Script** | 批量预测脚本。包含从序列到结构再到预测的全流程。 | ⚠️ Needs Update |
-| `src/docking.py` | **Utils** | 处理分子对接（Docking）和 Pocket 提取的逻辑。 | ✅ Active |
+| `src/docking.py` | **Utils** | 处理分子对接（Docking）和 Pocket 提取的逻辑。**当前使用 DiffDock**（`diffdock-integration` 分支）。 | ✅ Active |
 | `src/analyze_feature_label_relation.py` | **Diagnostic** | 数据层诊断脚本。分析图统计特征与 kcat 的相关性，不依赖 GNN 模型。 | ✅ Active |
 | `metadata_utils.py` | **Utils** | 管理实验元数据和结果记录。 | ✅ Active |
 
@@ -461,6 +463,58 @@ Linear(hidden_dim // 2, 1)  # 64 -> 1
 
 ---
 
+## 🔬 DiffDock 分子对接（diffdock-integration 分支）
+
+在 `diffdock-integration` 分支中，分子对接工具从 AutoDock Vina 切换为 **DiffDock**（基于扩散模型的分子对接工具）。
+
+### 安装 DiffDock
+
+1. **克隆 DiffDock 仓库**：
+   ```bash
+   git clone https://github.com/gcorso/DiffDock.git
+   cd DiffDock
+   ```
+
+2. **创建 Conda 环境**：
+   ```bash
+   conda env create --file environment.yml
+   conda activate diffdock
+   ```
+
+3. **设置环境变量**：
+   ```bash
+   export DIFFDOCK_PATH=/path/to/DiffDock
+   ```
+   或者在 `src/docking.py` 中直接修改 `DIFFDOCK_PATH` 变量。
+
+### DiffDock 使用说明
+
+- **输入格式**：
+  - 蛋白质：PDB 格式（`.pdb`）
+  - 配体：SDF 格式（`.sdf`），由 `smiles_to_sdf()` 函数从 SMILES 生成
+
+- **输出格式**：
+  - DiffDock 输出 SDF 格式的 docked 配体
+  - 代码自动将最佳 pose（rank1）转换为 PDB 格式用于后续 pocket 提取
+
+- **主要函数**：
+  - `run_diffdock()`: 调用 DiffDock 进行分子对接
+  - `smiles_to_sdf()`: 从 SMILES 生成 SDF 格式配体
+  - `sdf_to_pdb()`: 将 SDF 转换为 PDB 格式
+
+- **与 AutoDock Vina 的主要区别**：
+  - 不需要 PDBQT 格式（AutoDock Vina 需要）
+  - 不需要手动指定结合位点中心（DiffDock 自动预测）
+  - 输出包含置信度分数（confidence score）
+
+### 注意事项
+
+- 确保 DiffDock 环境已正确安装并激活
+- 首次运行 DiffDock 时会预计算 SO(2) 和 SO(3) 分布的查找表（可能需要几分钟）
+- 如果遇到路径问题，检查 `DIFFDOCK_PATH` 环境变量或代码中的路径设置
+
+---
+
 ## 🚧 已知瓶颈与开放问题
 
 1.  **预测脚本不兼容**：`src/pred_range_fixed.py` 尚未完全适配 `PocketGNNKcatOnly`，直接运行可能会因为输出维度期望不一致而报错。需要重构以支持单任务/双任务模型的自动切换。
@@ -468,6 +522,7 @@ Linear(hidden_dim // 2, 1)  # 64 -> 1
 3.  **温度特征**：目前的 Canonical Pipeline (`PocketGNNKcatOnly`) 显式移除了温度特征的输入，这是一个明确的设计选择，但在未来可能需要重新评估。
 4.  ~~**Pearson 相关系数 NaN 处理**~~：✅ 已修复，现在会正确处理常数输入的情况。
 5.  ~~**数据集划分不一致**~~：✅ 已修复，使用固定随机种子（seed=42）确保可重复性。
+6.  **DiffDock 路径配置**：当前 `src/docking.py` 中的 `DIFFDOCK_PATH` 需要手动设置，建议通过环境变量或配置文件管理。
 
 ##特征
 Data(x=[321, 52], edge_index=[2, 2814], edge_attr=[2814, 24], pos=[321, 3], temperature=[1], y=[2], pdb_id='kcat_000002_61151_10A.pdb', sample_id='kcat_000002', ec='1.1.1.1')

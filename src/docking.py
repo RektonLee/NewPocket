@@ -1,22 +1,184 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+分子对接模块 (Molecular Docking Module)
+
+支持的对接工具：
+- DiffDock: 基于扩散模型的分子对接（当前默认）
+- Chai-1: Co-folding 模型（见 docking_chai1.py）
+- AutoDock Vina: 传统对接（已移除，可作为参考）
+
+修复记录 (2026-01-19):
+- 修复硬编码路径问题
+- 添加 pose 验证模块集成
+- 改进错误处理
+- 支持可配置的 GPU ID
+"""
 import __main__
 __main__.pymol_argv = ['pymol', '-c']
-# from joblib import Parallel, delayed
 import os
 import subprocess
+import sys
+import tempfile
 import numpy as np
 import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import AllChem
-from vina import Vina
 from Bio.PDB import PDBParser, Select, PDBIO
-from pymol2 import PyMOL
 import hashlib
 import shutil
-PREP_BIN = "/home/lizihao/ADFRsuite_x86_64Linux_1.0/bin"
-RAWPOCKET_DIR = "/home/lizihao/Work/enzyme_prediction/src/simple2/data/processed/rawpocket"
-os.makedirs(RAWPOCKET_DIR, exist_ok=True)
+import logging
+from typing import Optional, Tuple, Dict
+from dataclasses import dataclass
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+@dataclass
+class DockingConfig:
+    """对接配置"""
+    diffdock_path: Optional[str] = None  # DiffDock 路径，None 则自动检测
+    diffdock_python: Optional[str] = None  # DiffDock Python 解释器
+    gpu_id: int = 0  # 默认 GPU ID（从环境变量 CUDA_VISIBLE_DEVICES 获取，或使用此默认值）
+    inference_steps: int = 20  # DiffDock 推理步数
+    samples_per_complex: int = 5  # 每个复合物生成的 pose 数量
+    pocket_cutoff: float = 5.0  # 口袋提取距离阈值（Å）
+    validate_pose: bool = True  # 是否验证 pose
+    failed_log_path: Optional[str] = None  # 失败日志路径，None 则自动生成
+
+
+def get_default_config() -> DockingConfig:
+    """获取默认配置（从环境变量读取）"""
+    config = DockingConfig()
+    
+    # GPU ID: 优先从环境变量读取
+    if 'DOCKING_GPU_ID' in os.environ:
+        config.gpu_id = int(os.environ['DOCKING_GPU_ID'])
+    elif 'CUDA_VISIBLE_DEVICES' in os.environ:
+        # 使用 CUDA_VISIBLE_DEVICES 中的第一个 GPU
+        devices = os.environ['CUDA_VISIBLE_DEVICES'].split(',')
+        if devices and devices[0].strip().isdigit():
+            config.gpu_id = int(devices[0].strip())
+    
+    return config
+
+
+# 全局配置（可在运行时修改）
+_config = get_default_config()
+
+
+def set_config(config: DockingConfig):
+    """设置全局配置"""
+    global _config
+    _config = config
+
+
+def get_config() -> DockingConfig:
+    """获取当前配置"""
+    return _config
+
+
+# ============================================================================
+# Path Detection
+# ============================================================================
+
+def _get_project_root() -> str:
+    """获取项目根目录"""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.dirname(script_dir)  # src 的父目录
+
+
+def _find_diffdock_path() -> str:
+    """自动查找 DiffDock 路径"""
+    # 1. 配置优先
+    if _config.diffdock_path and os.path.exists(_config.diffdock_path):
+        return _config.diffdock_path
+    
+    # 2. 环境变量
+    env_path = os.environ.get("DIFFDOCK_PATH")
+    if env_path and os.path.exists(env_path):
+        return os.path.abspath(env_path)
+    
+    # 3. 项目根目录下的 DiffDock
+    project_root = _get_project_root()
+    default_path = os.path.join(project_root, "DiffDock")
+    if os.path.exists(default_path):
+        return default_path
+    
+    raise FileNotFoundError(
+        "DiffDock not found. Please:\n"
+        "  1. Set DIFFDOCK_PATH environment variable, or\n"
+        "  2. Place DiffDock in project root directory, or\n"
+        "  3. Set config.diffdock_path"
+    )
+
+
+def _find_diffdock_python() -> str:
+    """自动查找 DiffDock Python 解释器"""
+    # 1. 配置优先
+    if _config.diffdock_python and os.path.exists(_config.diffdock_python):
+        return _config.diffdock_python
+    
+    # 2. 环境变量
+    env_python = os.environ.get("DIFFDOCK_PYTHON")
+    if env_python and os.path.exists(env_python):
+        return env_python
+    
+    # 3. 自动查找 conda 环境
+    conda_base = os.environ.get("CONDA_PREFIX", "")
+    if conda_base:
+        conda_envs_dir = os.path.join(os.path.dirname(conda_base), "envs")
+        diffdock_python = os.path.join(conda_envs_dir, "diffdock", "bin", "python")
+        if os.path.exists(diffdock_python):
+            return diffdock_python
+    
+    # 4. 常见路径
+    home_dir = os.path.expanduser("~")
+    common_paths = [
+        os.path.join(home_dir, "miniforge3", "envs", "diffdock", "bin", "python"),
+        os.path.join(home_dir, "anaconda3", "envs", "diffdock", "bin", "python"),
+        os.path.join(home_dir, "miniconda3", "envs", "diffdock", "bin", "python"),
+        os.path.join(home_dir, "conda", "envs", "diffdock", "bin", "python"),
+    ]
+    for path in common_paths:
+        if os.path.exists(path):
+            return path
+    
+    # 5. 回退到当前 Python
+    logger.warning("DiffDock Python not found, using current Python (may not work)")
+    return sys.executable
+
+
+def _get_failed_log_path() -> str:
+    """获取失败日志路径"""
+    if _config.failed_log_path:
+        return _config.failed_log_path
+    
+    # 默认路径：项目根目录/logs/docking_failed.txt
+    project_root = _get_project_root()
+    log_dir = os.path.join(project_root, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    return os.path.join(log_dir, "docking_failed.txt")
+
+
+# 延迟初始化路径（避免导入时就报错）
+DIFFDOCK_PATH = None
+DIFFDOCK_PYTHON = None
+
+
+def _ensure_paths_initialized():
+    """确保路径已初始化"""
+    global DIFFDOCK_PATH, DIFFDOCK_PYTHON
+    if DIFFDOCK_PATH is None:
+        DIFFDOCK_PATH = _find_diffdock_path()
+    if DIFFDOCK_PYTHON is None:
+        DIFFDOCK_PYTHON = _find_diffdock_python()
 
 
 def clean_altlocs(infile, outfile):
@@ -36,6 +198,7 @@ def clean_altlocs(infile, outfile):
 
 
 def smiles_to_3d(smiles, outfile):
+    """从SMILES生成3D结构（PDB格式）"""
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         raise ValueError(f"无法解析 SMILES: {smiles}")
@@ -44,79 +207,33 @@ def smiles_to_3d(smiles, outfile):
     AllChem.UFFOptimizeMolecule(mol)
     Chem.MolToPDBFile(mol, outfile)
 
-def create_simple_pdbqt(pdb_file, pdbqt_file):
-    """创建简单的PDBQT文件用于Vina"""
+def smiles_to_sdf(smiles, outfile):
+    """从SMILES生成3D结构（SDF格式，用于DiffDock）"""
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"无法解析 SMILES: {smiles}")
+    mol = Chem.AddHs(mol)
+    AllChem.EmbedMolecule(mol, randomSeed=0xf00d)
+    AllChem.UFFOptimizeMolecule(mol)
+    writer = Chem.SDWriter(outfile)
+    writer.write(mol)
+    writer.close()
+
+def sdf_to_pdb(sdf_file, pdb_file):
+    """将SDF文件转换为PDB格式"""
     try:
-        with open(pdb_file, 'r') as f:
-            pdb_lines = f.readlines()
-        
-        with open(pdbqt_file, 'w') as f:
-            # 写入REMARK行
-            f.write("REMARK  Name = {}\n".format(os.path.basename(pdb_file)))
-            f.write("REMARK  0 active torsions:\n")
-            f.write("REMARK  status: ('A' for Active; 'I' for Inactive)\n")
-            f.write("REMARK                            x       y       z     vdW  Elec       q    Type\n")
-            f.write("REMARK                         _______ _______ _______ _____ _____    ______ ____\n")
-            
-            # 写入原子行
-            atom_count = 0
-            for line in pdb_lines:
-                if line.startswith(('ATOM', 'HETATM')):
-                    atom_count += 1
-                    # 解析PDB格式
-                    atom_name = line[12:16].strip()
-                    res_name = line[17:20].strip()
-                    chain_id = line[21]
-                    res_num = int(line[22:26])
-                    x = float(line[30:38])
-                    y = float(line[38:46])
-                    z = float(line[46:54])
-                    occupancy = float(line[54:60]) if line[54:60].strip() else 1.0
-                    temp_factor = float(line[60:66]) if line[60:66].strip() else 0.0
-                    
-                    # 确定原子类型
-                    atom_type = 'C'
-                    if atom_name.startswith('N'):
-                        atom_type = 'N'
-                    elif atom_name.startswith('O'):
-                        atom_type = 'O'
-                    elif atom_name.startswith('S'):
-                        atom_type = 'S'
-                    elif atom_name.startswith('H'):
-                        atom_type = 'H'
-                    
-                    # 计算电荷（简化版本）
-                    charge = 0.0
-                    if atom_name.startswith('H'):
-                        charge = 0.1
-                    elif atom_name.startswith('O'):
-                        charge = -0.1
-                    elif atom_name.startswith('N'):
-                        charge = 0.1
-                    
-                    # 格式化ATOM行
-                    atom_line = "ATOM  {:5d} {:4s} {:3s} {:1s}{:4d}    {:8.3f}{:8.3f}{:8.3f} {:5.2f} {:5.2f}    {:7.3f} {:2s}\n".format(
-                        atom_count,
-                        atom_name,
-                        res_name,
-                        chain_id,
-                        res_num,
-                        x,
-                        y,
-                        z,
-                        occupancy,
-                        temp_factor,
-                        charge,
-                        atom_type
-                    )
-                    f.write(atom_line)
-        
-        print(f"✅ 简单PDBQT文件创建成功: {pdbqt_file}")
+        suppl = Chem.SDMolSupplier(sdf_file)
+        mol = suppl[0]  # 取第一个分子
+        if mol is None:
+            raise ValueError(f"无法从SDF文件读取分子: {sdf_file}")
+        Chem.MolToPDBFile(mol, pdb_file)
+        print(f"✅ SDF转PDB成功: {sdf_file} -> {pdb_file}")
         return True
-        
     except Exception as e:
-        print(f"❌ 创建简单PDBQT失败: {e}")
+        print(f"❌ SDF转PDB失败: {e}")
         return False
+
+# 移除PDBQT相关函数，DiffDock不需要PDBQT格式
 
 def find_binding_site_center(protein_pdb, ligand_pdb=None):
     """识别结合位点中心"""
@@ -188,31 +305,7 @@ def extract_pocket_region(protein_pdb, center, radius=10.0, output_pdb=None):
         return None
 
 
-def move_ligand_to_box_center(lig_pdbqt, target_center, output_pdbqt):
-    lines = []
-    coords = []
-    for line in open(lig_pdbqt):
-        if line.startswith("HETATM"):
-            x = float(line[30:38])
-            y = float(line[38:46])
-            z = float(line[46:54])
-            coords.append([x, y, z])
-        lines.append(line)
-
-    coords = np.array(coords)
-    current_center = coords.mean(axis=0)
-    shift = np.array(target_center) - current_center
-
-    with open(output_pdbqt, "w") as fout:
-        for line in lines:
-            if line.startswith("HETATM"):
-                x = float(line[30:38]) + shift[0]
-                y = float(line[38:46]) + shift[1]
-                z = float(line[46:54]) + shift[2]
-                new_line = line[:30] + f"{x:8.3f}{y:8.3f}{z:8.3f}" + line[54:]
-                fout.write(new_line)
-            else:
-                fout.write(line)
+# 移除move_ligand_to_box_center函数，DiffDock会自动处理配体位置
 
 
 def extract_box_from_pdb(pocket_pdb, margin=2.0):
@@ -288,27 +381,7 @@ def create_fallback_pocket(protein_pdb_path, output_pocket_path):
     return center, size
 
 
-def convert_pdbqt_to_pdb(pdbqt_file, pdb_file):
-    """将PDBQT文件转换为PDB格式"""
-    try:
-        with open(pdbqt_file, 'r') as f_in, open(pdb_file, 'w') as f_out:
-            for line in f_in:
-                if line.startswith(('ATOM', 'HETATM')):
-                    # 移除PDBQT特有的电荷和原子类型信息，保留标准PDB格式
-                    # PDBQT格式: ATOM      1  N   ALA A   1      20.154  16.967  25.462  1.00 11.18           N
-                    # PDB格式:   ATOM      1  N   ALA A   1      20.154  16.967  25.462  1.00 11.18           N
-                    pdb_line = line[:66] + '\n'  # 只保留前66个字符
-                    f_out.write(pdb_line)
-                elif line.startswith(('HEADER', 'TITLE', 'REMARK', 'SEQRES', 'ATOM', 'HETATM', 'TER', 'END')):
-                    # 保留其他标准PDB记录
-                    f_out.write(line)
-        
-        print(f"✅ PDBQT转PDB成功: {pdbqt_file} -> {pdb_file}")
-        return True
-        
-    except Exception as e:
-        print(f"❌ PDBQT转PDB失败: {e}")
-        return False
+# 移除convert_pdbqt_to_pdb函数，DiffDock输出SDF格式，使用sdf_to_pdb转换
 
 def extract_pocket_pymol(protein_path, ligand_path, output_path, cutoff=5.0):
     """使用Bio.PDB提取口袋区域（包含配体原子）"""
@@ -403,173 +476,433 @@ def extract_pocket_pymol(protein_path, ligand_path, output_path, cutoff=5.0):
         raise
 
 
-def run_preprocess(uniprot_id, smiles, prot_pdb_path, output_pocket_path, index):
+def run_diffdock(protein_pdb: str, 
+                 ligand_sdf: str, 
+                 output_dir: str, 
+                 inference_steps: Optional[int] = None, 
+                 samples_per_complex: Optional[int] = None, 
+                 gpu_id: Optional[int] = None,
+                 validate: Optional[bool] = None,
+                 original_smiles: Optional[str] = None) -> Optional[str]:
+    """
+    使用 DiffDock 进行分子对接
+    
+    Args:
+        protein_pdb: 蛋白质 PDB 文件路径
+        ligand_sdf: 配体 SDF 文件路径
+        output_dir: 输出目录
+        inference_steps: 推理步数（默认从配置读取）
+        samples_per_complex: 每个复合物生成的 pose 数量
+        gpu_id: GPU 设备 ID（默认从配置读取）
+        validate: 是否验证 pose（默认从配置读取）
+        original_smiles: 原始 SMILES（用于立体化学验证）
+    
+    Returns:
+        output_sdf: 最佳 pose 的 SDF 文件路径，失败返回 None
+    """
+    # 确保路径已初始化
+    _ensure_paths_initialized()
+    
+    # 使用配置默认值
+    if inference_steps is None:
+        inference_steps = _config.inference_steps
+    if samples_per_complex is None:
+        samples_per_complex = _config.samples_per_complex
+    if gpu_id is None:
+        gpu_id = _config.gpu_id
+    if validate is None:
+        validate = _config.validate_pose
+    
+    try:
+        # 设置 GPU
+        env = os.environ.copy()
+        env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+        logger.info(f"🔧 Using GPU {gpu_id}")
+        
+        # DiffDock 路径（已在 _ensure_paths_initialized 中验证）
+        diffdock_path = os.path.abspath(DIFFDOCK_PATH)
+        python_exec = DIFFDOCK_PYTHON
+        
+        logger.info(f"🔬 DiffDock path: {diffdock_path}")
+        logger.info(f"🔬 Python: {python_exec}")
+        
+        # 确保输出目录存在
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 方法1: 尝试使用CSV文件方式（DiffDock推荐方式）
+        # 创建临时CSV文件
+        csv_file = os.path.join(output_dir, "diffdock_input.csv")
+        with open(csv_file, 'w') as f:
+            f.write("protein_path,ligand_path\n")
+            f.write(f"{os.path.abspath(protein_pdb)},{os.path.abspath(ligand_sdf)}\n")
+        
+        # 查找 DiffDock inference 脚本
+        possible_scripts = [
+            os.path.join(diffdock_path, "inference.py"),
+            os.path.join(diffdock_path, "scripts", "inference.py"),
+            os.path.join(diffdock_path, "diffdock", "inference.py"),
+        ]
+        
+        cmd = None
+        for script_path in possible_scripts:
+            if os.path.exists(script_path):
+                # 使用inference.py脚本
+                cmd = [
+                    python_exec, script_path,
+                    "--protein_path", os.path.abspath(protein_pdb),
+                    "--ligand_path", os.path.abspath(ligand_sdf),
+                    "--out_dir", os.path.abspath(output_dir),
+                    "--inference_steps", str(inference_steps),
+                    "--samples_per_complex", str(samples_per_complex)
+                ]
+                break
+        
+        # 如果找不到脚本，尝试使用命令行模块方式
+        if cmd is None:
+            # 尝试使用命令行模块
+            cmd = [
+                python_exec, "-m", "diffdock.dock",
+                "--protein_path", os.path.abspath(protein_pdb),
+                "--ligand_path", os.path.abspath(ligand_sdf),
+                "--out_dir", os.path.abspath(output_dir),
+                "--inference_steps", str(inference_steps),
+                "--samples_per_complex", str(samples_per_complex)
+            ]
+        
+        logger.info(f"🔬 Running DiffDock...")
+        logger.info(f"   Protein: {protein_pdb}")
+        logger.info(f"   Ligand: {ligand_sdf}")
+        logger.info(f"   Output: {output_dir}")
+        logger.info(f"   Command: {' '.join(cmd)}")
+        logger.info(f"   ⚠️ First run may take minutes to download models...")
+        
+        # 运行 DiffDock
+        process = subprocess.Popen(
+            cmd,
+            cwd=diffdock_path,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+        
+        # 实时输出
+        logger.info(f"   DiffDock output:")
+        logger.info(f"   {'='*60}")
+        stdout_lines = []
+        try:
+            for line in process.stdout:
+                line = line.rstrip()
+                if line:
+                    logger.info(f"   {line}")
+                    stdout_lines.append(line)
+            process.wait()
+        except KeyboardInterrupt:
+            process.kill()
+            raise
+        
+        if process.returncode != 0:
+            error_msg = '\n'.join(stdout_lines[-50:])
+            raise subprocess.CalledProcessError(process.returncode, cmd, output=error_msg)
+        
+        logger.info(f"   {'='*60}")
+        logger.info(f"✅ DiffDock completed")
+        
+        # 查找最佳 pose
+        best_pose = _find_best_pose(output_dir)
+        
+        if best_pose is None:
+            raise FileNotFoundError(
+                f"❌ DiffDock did not generate output files\n"
+                f"   Output dir: {output_dir}\n"
+                f"   Contents: {os.listdir(output_dir) if os.path.exists(output_dir) else 'not exists'}"
+            )
+        
+        # 可选：验证 pose
+        if validate:
+            try:
+                from pose_validation import validate_pose_quick
+                if not validate_pose_quick(best_pose):
+                    logger.warning(f"⚠️ Pose validation failed for {best_pose}")
+                    # 不直接失败，只是警告
+            except ImportError:
+                logger.warning("pose_validation module not available, skipping validation")
+        
+        logger.info(f"✅ Best pose: {best_pose}")
+        return best_pose
+        
+    except subprocess.TimeoutExpired:
+        logger.error(f"❌ DiffDock timeout")
+        return None
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ DiffDock failed: {e}")
+        if e.stdout:
+            logger.error(f"   stdout: {e.stdout[:1000]}")
+        return None
+    except FileNotFoundError as e:
+        logger.error(f"❌ {e}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ DiffDock docking failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def _find_best_pose(output_dir: str) -> Optional[str]:
+    """
+    从 DiffDock 输出目录中查找最佳 pose
+    
+    查找优先级：
+    1. rank1_*.sdf
+    2. confidence 最高的文件
+    3. 任何 .sdf 文件
+    """
+    if not os.path.exists(output_dir):
+        return None
+    
+    sdf_files = []
+    for f in os.listdir(output_dir):
+        if f.endswith('.sdf'):
+            file_path = os.path.join(output_dir, f)
+            # rank1 优先
+            if 'rank1' in f.lower() or 'rank_1' in f.lower():
+                return file_path
+            sdf_files.append((f, file_path))
+    
+    # 按文件名排序（通常 confidence 较高的排前面）
+    sdf_files.sort(key=lambda x: x[0])
+    
+    if sdf_files:
+        return sdf_files[0][1]
+    
+    return None
+
+
+def run_preprocess(uniprot_id: str, 
+                   smiles: str, 
+                   prot_pdb_path: str, 
+                   output_pocket_path: str, 
+                   index: int,
+                   gpu_id: Optional[int] = None,
+                   validate_pose: bool = True) -> bool:
+    """
+    使用 DiffDock 进行分子对接和口袋提取
+    
+    Args:
+        uniprot_id: UniProt ID
+        smiles: 底物 SMILES 字符串
+        prot_pdb_path: 蛋白质 PDB 文件路径
+        output_pocket_path: 输出口袋文件路径
+        index: 样本索引
+        gpu_id: GPU ID（默认使用配置）
+        validate_pose: 是否验证 pose
+    
+    Returns:
+        bool: 处理是否成功
+    """
+    # 使用临时目录避免污染工作目录
     base_name = f"{uniprot_id}_{int(hashlib.sha256(smiles.encode()).hexdigest(), 16) & 0xffff}"
-    tmp_dir = f"tmp/{base_name}"
-    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix=f"docking_{base_name}_")
     orig_dir = os.getcwd()
     
-    # 确保prot_pdb_path是绝对路径
+    # 确保路径是绝对路径
     prot_pdb_path = os.path.abspath(prot_pdb_path)
+    output_pocket_path = os.path.abspath(output_pocket_path)
     
     os.chdir(tmp_dir)
 
     try:
-        # 自动生成输出文件名（"prot_clean.pdb"）
-        output_path = os.path.splitext(prot_pdb_path)[0] + "_clean.pdb"
-        # 确保使用绝对路径
-        output_path = os.path.abspath(output_path)
-        if smiles=="C(=O)=O":
-            raise ValueError("❌ SMILES 解析失败: C(=O)=O")
-        # 调用函数
-        clean_altlocs(prot_pdb_path, output_path)
-        smiles_to_3d(smiles, "ligand.pdb")
-        subprocess.run([f"{PREP_BIN}/prepare_ligand", "-l", "ligand.pdb", "-A", "hydrogens", "-o", "ligand.pdbqt"], check=True)
-        subprocess.run([f"{PREP_BIN}/prepare_receptor", "-r", output_path, "-A", "hydrogens", "-U", "lps_waters_nonstdres", "-o", "receptor.pdbqt"], check=True)
-        rawpocket_path = os.path.join(RAWPOCKET_DIR, f"{uniprot_id}_rawpocket.pdb")
-        os.makedirs("autosite_out", exist_ok=True)
-        use_fallback = False
+        # 验证 SMILES
+        if not _validate_smiles(smiles):
+            raise ValueError(f"Invalid SMILES: {smiles}")
         
-        if not os.path.exists(rawpocket_path):
-            subprocess.run([f"{PREP_BIN}/autosite", "-r", "receptor.pdbqt", "-o", "autosite_out"], check=True)
-            pocket_file = "receptor_cl_001.pdb"
-            pocket_src = os.path.join("autosite_out", pocket_file)
-            if os.path.exists(pocket_src):
-                shutil.copyfile(pocket_src, rawpocket_path)
-                print(f"✅ AutoSite口袋缓存成功: {rawpocket_path}")
-            else:
-                print(f"⚠️ AutoSite未找到结合位点，使用fallback策略")
-                use_fallback = True
+        # 清理蛋白质 PDB
+        clean_pdb_path = os.path.join(tmp_dir, "protein_clean.pdb")
+        clean_altlocs(prot_pdb_path, clean_pdb_path)
+        
+        # 生成配体 SDF
+        ligand_sdf = os.path.join(tmp_dir, "ligand.sdf")
+        smiles_to_sdf(smiles, ligand_sdf)
+        logger.info(f"✅ Ligand SDF: {ligand_sdf}")
+        
+        # 运行 DiffDock
+        diffdock_output_dir = os.path.join(tmp_dir, "diffdock_output")
+        os.makedirs(diffdock_output_dir, exist_ok=True)
+        
+        docked_ligand_sdf = run_diffdock(
+            protein_pdb=clean_pdb_path,
+            ligand_sdf=ligand_sdf,
+            output_dir=diffdock_output_dir,
+            gpu_id=gpu_id,
+            validate=validate_pose,
+            original_smiles=smiles
+        )
+        
+        if docked_ligand_sdf is None:
+            raise RuntimeError("DiffDock failed to generate pose")
+        
+        # SDF -> PDB
+        pose_pdb = os.path.join(tmp_dir, "pose.pdb")
+        if not sdf_to_pdb(docked_ligand_sdf, pose_pdb):
+            raise RuntimeError("Failed to convert SDF to PDB")
+        
+        # 提取口袋
+        os.makedirs(os.path.dirname(output_pocket_path), exist_ok=True)
+        extract_pocket_pymol(clean_pdb_path, pose_pdb, output_pocket_path, 
+                            cutoff=_config.pocket_cutoff)
+        
+        # 验证输出
+        if os.path.exists(output_pocket_path):
+            file_size = os.path.getsize(output_pocket_path)
+            logger.info(f"✅ {base_name} completed -> {output_pocket_path} ({file_size} bytes)")
+            return True
         else:
-            print(f"📦 使用缓存的 AutoSite 结果: {rawpocket_path}")
-
-        # 如果AutoSite失败，使用fallback策略
-        if use_fallback:
-            # 创建基于蛋白质几何中心的简单口袋
-            center, size = create_fallback_pocket(output_path, rawpocket_path)
-        else:
-            center, size = extract_box_from_pdb(rawpocket_path)
-        # if len(pockets) >3:
-        #     for p in pockets[3:]:
-        #         os.remove(os.path.join("autosite_out", p))
-        move_ligand_to_box_center("ligand.pdbqt", center, "ligand_moved.pdbqt")
-
-        v = Vina()
-        v.set_receptor(rigid_pdbqt_filename="receptor.pdbqt")
-        v.set_ligand_from_file("ligand_moved.pdbqt")
-        v.compute_vina_maps(center=center, box_size=size)
-        v.dock(exhaustiveness=16, n_poses=5)
-        v.write_poses("vina_out.pdbqt", n_poses=5, overwrite=True)
-
-        subprocess.run(["/home/lizihao/autodock_vina_1_1_2_linux_x86/bin/vina_split", "--input", "vina_out.pdbqt", "--ligand", "vina_out_ligand_"], check=True)
-        with open("pose0.pdb", "w") as w:
-            for ln in open("vina_out_ligand_1.pdbqt"):
-                if ln.startswith(("ATOM", "HETATM")):
-                    w.write(ln[:66] + "\n")
-
-        # with open("complex.pdb", "w") as w:
-        #     w.writelines(open(f"{output_path}"))
-            # for ln in open("pose0.pdb"):
-            #     if ln.startswith("ATOM") or ln.startswith("HETATM"):
-            #         ln = ln[:21] + 'L' + ln[22:]
-            #     w.write(ln)
-
-        # 使用传入的输出路径，但是先切换回原始目录
-        os.chdir(orig_dir)
-        out_pocket_path = os.path.abspath(output_pocket_path)
-        print(f"🔍 准备提取口袋: {out_pocket_path}")
-        
-        # 确保输出目录存在
-        os.makedirs(os.path.dirname(out_pocket_path), exist_ok=True)
-        
-        # 切换回临时目录获取文件路径
-        os.chdir(tmp_dir)
-        
-        # 将PDBQT转换为PDB格式，因为Bio.PDB无法解析PDBQT
-        receptor_pdbqt_path = os.path.abspath("receptor.pdbqt")
-        receptor_pdb_path = os.path.abspath("receptor.pdb")
-        pose_path = os.path.abspath("pose0.pdb")
-        
-        print(f"🔍 受体PDBQT路径: {receptor_pdbqt_path}")
-        print(f"🔍 受体PDB路径: {receptor_pdb_path}")
-        print(f"🔍 配体路径: {pose_path}")
-        
-        # 检查文件是否存在
-        if not os.path.exists(receptor_pdbqt_path):
-            raise FileNotFoundError(f"受体PDBQT文件不存在: {receptor_pdbqt_path}")
-        if not os.path.exists(pose_path):
-            raise FileNotFoundError(f"配体文件不存在: {pose_path}")
-        
-        # 将PDBQT转换为PDB格式
-        print(f"🔄 将PDBQT转换为PDB格式...")
-        convert_pdbqt_to_pdb(receptor_pdbqt_path, receptor_pdb_path)
-        
-        # 使用PDB格式的文件进行口袋提取
-        extract_pocket_pymol(receptor_pdb_path, pose_path, out_pocket_path, cutoff=5)
-        
-        # 验证口袋文件是否成功生成
-        if os.path.exists(out_pocket_path):
-            file_size = os.path.getsize(out_pocket_path)
-            print(f"✅ {base_name} 处理完成 -> {out_pocket_path} (size: {file_size} bytes)")
-            return True  # 返回成功标志
-        else:
-            raise FileNotFoundError(f"口袋文件未成功保存到目标位置: {out_pocket_path}")
+            raise FileNotFoundError(f"Pocket file not saved: {output_pocket_path}")
             
     except Exception as e:
-        print(f"❌ 处理失败 {uniprot_id}: {e}")
-        with open("/home/lizihao/Work/enzyme_prediction/src/simple2/data/failed_samples.txt", "a") as f:
-            f.write(f"{uniprot_id},{index}\n")
+        logger.error(f"❌ Failed {uniprot_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # 记录失败
+        failed_log = _get_failed_log_path()
+        with open(failed_log, "a") as f:
+            f.write(f"{uniprot_id},{index},{str(e)[:100]}\n")
         return False
+        
     finally:
         os.chdir(orig_dir)
-        # 延迟清理，确保文件已经保存完成
+        # 清理临时目录
         try:
-            subprocess.run(["rm", "-rf", tmp_dir], timeout=10)
-        except subprocess.TimeoutExpired:
-            print(f"⚠️ 清理临时目录超时: {tmp_dir}")
+            shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception as cleanup_e:
-            print(f"⚠️ 清理临时目录时出错: {cleanup_e}")
+            logger.warning(f"⚠️ Failed to cleanup {tmp_dir}: {cleanup_e}")
 
+
+def _validate_smiles(smiles: str) -> bool:
+    """
+    验证 SMILES 是否有效
+    
+    Returns:
+        bool: 是否有效
+    """
+    # 已知有问题的 SMILES
+    problematic_smiles = {
+        "C(=O)=O",  # CO2，RDKit 无法处理
+        "",
+        ".",
+    }
+    
+    if smiles in problematic_smiles:
+        logger.warning(f"⚠️ Problematic SMILES skipped: {smiles}")
+        return False
+    
+    # 尝试解析
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return False
+        return True
+    except:
+        return False
+
+
+
+# ============================================================================
+# CLI
+# ============================================================================
+
+def main():
+    """命令行入口"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Molecular Docking Module")
+    subparsers = parser.add_subparsers(dest='command', help='Commands')
+    
+    # dock 子命令
+    dock_parser = subparsers.add_parser('dock', help='Run docking')
+    dock_parser.add_argument('--protein', type=str, required=True, help='Protein PDB file')
+    dock_parser.add_argument('--ligand', type=str, required=True, help='Ligand SDF file')
+    dock_parser.add_argument('--output', type=str, default='output', help='Output directory')
+    dock_parser.add_argument('--gpu', type=int, default=None, help='GPU ID')
+    dock_parser.add_argument('--no-validate', action='store_true', help='Skip pose validation')
+    
+    # batch 子命令
+    batch_parser = subparsers.add_parser('batch', help='Batch docking from CSV')
+    batch_parser.add_argument('--csv', type=str, required=True, help='Input CSV file')
+    batch_parser.add_argument('--pdb-dir', type=str, required=True, help='Directory containing PDB files')
+    batch_parser.add_argument('--output-dir', type=str, default='pockets', help='Output directory')
+    batch_parser.add_argument('--gpu', type=int, default=None, help='GPU ID')
+    
+    # check 子命令
+    check_parser = subparsers.add_parser('check', help='Check DiffDock installation')
+    
+    args = parser.parse_args()
+    
+    if args.command == 'check':
+        print("Checking DiffDock installation...")
+        try:
+            _ensure_paths_initialized()
+            print(f"✅ DiffDock path: {DIFFDOCK_PATH}")
+            print(f"✅ Python: {DIFFDOCK_PYTHON}")
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            
+    elif args.command == 'dock':
+        if args.gpu is not None:
+            _config.gpu_id = args.gpu
+        _config.validate_pose = not args.no_validate
+        
+        result = run_diffdock(
+            protein_pdb=args.protein,
+            ligand_sdf=args.ligand,
+            output_dir=args.output
+        )
+        if result:
+            print(f"✅ Docking completed: {result}")
+        else:
+            print("❌ Docking failed")
+            
+    elif args.command == 'batch':
+        if args.gpu is not None:
+            _config.gpu_id = args.gpu
+            
+        df = pd.read_csv(args.csv)
+        os.makedirs(args.output_dir, exist_ok=True)
+        
+        success_count = 0
+        for idx, row in enumerate(df.itertuples()):
+            uniprot = getattr(row, 'uniprot', None)
+            smiles = getattr(row, 'substrate_smiles', None)
+            
+            if not uniprot or not smiles:
+                logger.warning(f"Skipping row {idx}: missing uniprot or smiles")
+                continue
+            
+            smiles = smiles.split(';')[0]  # 取第一个 SMILES
+            
+            pdb_path = os.path.join(args.pdb_dir, f"{uniprot}.pdb")
+            if not os.path.exists(pdb_path):
+                logger.warning(f"⚠️ Missing PDB: {pdb_path}")
+                continue
+            
+            # 生成输出路径
+            pocket_hash = int(hashlib.sha256(smiles.encode()).hexdigest(), 16) & 0xffff
+            output_path = os.path.join(args.output_dir, f"{uniprot}_{pocket_hash}_pocket.pdb")
+            
+            if run_preprocess(uniprot, smiles, pdb_path, output_path, idx):
+                success_count += 1
+            
+            print(f"Progress: {idx+1}/{len(df)}")
+        
+        print(f"✅ Completed: {success_count}/{len(df)} successful")
+        
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":
-    df = pd.read_csv("/home/lizihao/Work/enzyme_prediction/src/simple2/Example_DLKcat_S.csv")
-    os.makedirs("data/processed/pockets", exist_ok=True)
-    print(f"Working directory: {os.getcwd()}")
-    # ...existing code...
-    for idx,row in enumerate(df.itertuples()):
-        uniprot = row.uniprot
-        smiles = row.substrate_smiles.split(';')[0]
-        
-        pdb_path = f"/home/lizihao/Work/enzyme_prediction/src/simple2/output/pdb_files/{uniprot}.pdb"
-        if os.path.exists(pdb_path):
-            try:
-                run_preprocess(uniprot, smiles, pdb_path, output_dir="data/processed/pockets",index=idx)
-            except Exception as e:
-                print(f"❌ 处理失败 {uniprot}: {e}")
-        else:
-            print(f"⚠️ 缺失 PDB 文件: {pdb_path}")
-        print(f"✅ 处理完成 {idx+1}/{len(df)}")
-    print("✅ 所有文件处理完成！")
-
-
-# def preprocess_wrapper(idx, row):
-#     uniprot = row.uniprot
-#     smiles = row.substrate_smiles.split(';')[0]
-#     pdb_path = f"/home/lizihao/Work/enzyme_prediction/src/output/pdb_files/{uniprot}.pdb"
-
-#     if os.path.exists(pdb_path):
-#         try:
-#             run_preprocess(uniprot, smiles, pdb_path, output_dir="data/processed/pockets", index=idx)
-#         except Exception as e:
-#             print(f"❌ 处理失败 {uniprot}: {e}")
-#     else:
-#         print(f"⚠️ 缺失 PDB 文件: {pdb_path}")
-#     print(f"✅ 处理完成 {idx+1}/{len(df)}")
-# # print("✅ 所有文件处理完成！")
-
-# if __name__ == "__main__":
-#     df = pd.read_csv("/home/lizihao/Work/enzyme_prediction/data/cleaned_data.csv")
-#     os.makedirs("data/processed/pockets", exist_ok=True)
-
-#     Parallel(n_jobs=4)(delayed(preprocess_wrapper)(idx, row) for idx, row in enumerate(df.itertuples()))
+    main()

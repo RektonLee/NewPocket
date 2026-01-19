@@ -94,7 +94,7 @@ def train(args):
     save_dir = args.save_dir
     batch_size = 32 # defaults if not in args, but usually controlled by loop or constant
     lr = 5e-4  # ⚡ 对于大模型，使用更小的学习率
-    max_epochs = 500
+    max_epochs = 500  # 默认训练轮数
     
     # Check if we should override defaults with args
     if hasattr(args, 'batch_size'): batch_size = args.batch_size
@@ -106,14 +106,28 @@ def train(args):
         if hasattr(args, 'hidden_dim') and args.hidden_dim >= 256:
             lr = 5e-4
         # 否则使用默认的 1e-3（已经在上面定义了）
-    if hasattr(args, 'epochs'): max_epochs = args.epochs
+    
+    # 处理 epochs 参数（支持 --max_epochs 和 --epochs）
+    if args.max_epochs is not None:
+        max_epochs = args.max_epochs
+    elif args.epochs is not None:
+        max_epochs = args.epochs
+    
+    # 处理 loss_type 参数（向后兼容）
+    if args.loss_type is not None:
+        print(f"⚠️  警告: --loss_type 已弃用，请使用 --loss")
+        args.loss = args.loss_type
     
     # ========== 实验命名和目录管理 ==========
     # 获取实验名称和 run_id（通过 save_metadata，它会自动管理 experiments/ 目录）
     # 如果用户没有指定 exp_name，使用默认值
     exp_name = getattr(args, 'exp_name', 'kcat_default')
+    
+    # ⚡ 简化目录结构：统一使用 experiments/exp_name/run_id 作为 save_dir
+    # 这样所有文件（模型、图像、元数据）都在一个地方，不需要 outputs/ 和 experiments/ 两个目录
+    # 先调用 save_metadata 创建实验记录
     exp_name, run_id = save_metadata(
-        save_dir=save_dir,
+        save_dir=save_dir,  # 临时传入，稍后会更新
         dataset_path=dataset_path,
         exp_name=exp_name,
         graph_builder_version='enhanced_builder',
@@ -121,8 +135,17 @@ def train(args):
         comments=f'Enhanced: pooling={args.pooling_type}, seq_emb={args.use_seq_embedding}, loss={args.loss}, wd={args.weight_decay}'
     )
     
-    # 统一命名规则：确保 outputs/、wandb/、experiments/ 目录中的内容对应
-    # wandb run name 格式: {exp_name}_{run_id}，例如 "kcat_attn_v1_run_01"
+    # 从 experiments 目录读取实际的 run_dir 路径
+    from pathlib import Path
+    from metadata_utils import ExperimentTracker
+    tracker = ExperimentTracker()
+    run_dir = tracker.base_dir / exp_name / run_id
+    
+    # 更新 save_dir 为统一的 experiments 目录（替代原来的 outputs/xxx）
+    save_dir = str(run_dir)
+    print(f"📁 统一目录: {save_dir} (包含模型、图像、元数据，替代 outputs/ 和 experiments/ 分离)")
+    
+    # 统一命名规则：wandb run name 格式: {exp_name}_{run_id}，例如 "kcat_attn_v1_run_01"
     wandb_run_name = f"{exp_name}_{run_id}"
     
     # 定义 device（在 wandb_config 之前）
@@ -371,8 +394,16 @@ def train(args):
     if use_quantile:
         quantiles = [float(q) for q in args.quantiles.split(',')]
         print(f"Using Quantile Regression with quantiles: {quantiles}")
+        # 解析quantile权重（如果提供）
+        if hasattr(args, 'quantile_weights') and args.quantile_weights is not None:
+            quantile_weights = [float(w) for w in args.quantile_weights.split(',')]
+            assert len(quantile_weights) == len(quantiles), "Quantile weights must match quantiles length"
+            print(f"Using quantile weights: {quantile_weights}")
+        else:
+            quantile_weights = None
     else:
         quantiles = None
+        quantile_weights = None
     
     model = MD.PocketGNNKcatOnly(
         node_input_dim=node_input_dim,
@@ -399,7 +430,7 @@ def train(args):
         
     scheduler = None
     if args.scheduler == 'plateau':
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.patience, verbose=True)
     elif args.scheduler == 'cosine':
         # T_0 could be max_epochs
         scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=50, T_mult=2)
@@ -476,7 +507,7 @@ def train(args):
             
             # 计算loss
             if use_quantile:
-                loss = quantile_loss(out, log_y, quantiles=quantiles)
+                loss = quantile_loss(out, log_y, quantiles=quantiles, weights=quantile_weights)
             else:
                 loss = criterion(out, log_y)
             
@@ -534,7 +565,7 @@ def train(args):
                     
                 # 计算loss
                 if use_quantile:
-                    loss = quantile_loss(out, log_y, quantiles=quantiles)
+                    loss = quantile_loss(out, log_y, quantiles=quantiles, weights=quantile_weights)
                 else:
                     loss = criterion(out, log_y)
                     
@@ -770,6 +801,145 @@ def train(args):
         plt.grid(True, alpha=0.3)
         plt.savefig(os.path.join(save_dir, 'kcat_prediction_scatter.png'))
         plt.close()
+        
+        # ⚡ 添加详细的置信区间分析可视化
+        print("\n" + "=" * 60)
+        print("📊 置信区间质量分析")
+        print("=" * 60)
+        
+        # 计算详细统计
+        in_interval = (y_true_flat >= y_pred_low) & (y_true_flat <= y_pred_high)
+        out_below = y_true_flat < y_pred_low  # 真实值低于下界
+        out_above = y_true_flat > y_pred_high  # 真实值高于上界
+        interval_widths = y_pred_high - y_pred_low
+        
+        print(f"✅ Coverage: {quantile_metrics_end['coverage']:.1%} (理想值: {(quantiles[2] - quantiles[0])*100:.1f}%)")
+        print(f"   落在区间内: {in_interval.sum()}/{len(y_true_flat)} 个样本")
+        print(f"   真实值 < 预测下界 (模型过于乐观，预测偏高): {out_below.sum()} 个样本 ({out_below.sum()/len(y_true_flat):.1%})")
+        print(f"   真实值 > 预测上界 (模型过于保守，预测偏低): {out_above.sum()} 个样本 ({out_above.sum()/len(y_true_flat):.1%})")
+        print(f"\n📏 区间宽度统计:")
+        print(f"   平均宽度: {interval_widths.mean():.3f}")
+        print(f"   中位数宽度: {np.median(interval_widths):.3f}")
+        print(f"   最小宽度: {interval_widths.min():.3f}")
+        print(f"   最大宽度: {interval_widths.max():.3f}")
+        print(f"   标准差: {interval_widths.std():.3f}")
+        
+        # 按真实值范围分组分析 coverage
+        print(f"\n📈 按真实值范围分组的 Coverage:")
+        true_ranges = [
+            (y_true_flat.min(), np.percentile(y_true_flat, 25), "低值 (0-25%)"),
+            (np.percentile(y_true_flat, 25), np.percentile(y_true_flat, 75), "中值 (25-75%)"),
+            (np.percentile(y_true_flat, 75), y_true_flat.max(), "高值 (75-100%)")
+        ]
+        for low, high, label in true_ranges:
+            mask = (y_true_flat >= low) & (y_true_flat < high)
+            if mask.sum() > 0:
+                group_coverage = in_interval[mask].mean()
+                print(f"   {label}: {group_coverage:.1%} ({in_interval[mask].sum()}/{mask.sum()})")
+        
+        print(f"\n💡 图例说明:")
+        print(f"   - 红色向下三角形 (左上角): 真实值很小，但模型预测值偏大 → 模型过于乐观")
+        print(f"   - 橙色向上三角形 (右下角): 真实值很大，但模型预测值偏小 → 模型过于保守")
+        print(f"   - 蓝色圆点: 真实值落在预测区间内的样本")
+        
+        # 1. 区间宽度分布直方图
+        plt.figure(figsize=(10, 6))
+        plt.hist(interval_widths, bins=50, alpha=0.7, edgecolor='black')
+        plt.axvline(interval_widths.mean(), color='r', linestyle='--', linewidth=2, label=f'Mean: {interval_widths.mean():.3f}')
+        plt.xlabel('Interval Width (log10 kcat)')
+        plt.ylabel('Frequency')
+        plt.title(f'Distribution of Prediction Interval Widths\nMean: {interval_widths.mean():.3f}, Median: {np.median(interval_widths):.3f}')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'interval_width_distribution.png'), dpi=150)
+        plt.close()
+        print(f"   ✅ 区间宽度分布图已保存")
+        
+        # 2. Coverage vs Interval Width 散点图（按样本）
+        plt.figure(figsize=(10, 6))
+        colors = ['green' if in_int else 'red' for in_int in in_interval]
+        plt.scatter(interval_widths, np.abs(y_true_flat - y_pred_median), 
+                   c=colors, alpha=0.5, s=20)
+        plt.xlabel('Interval Width')
+        plt.ylabel('|True - Median Prediction|')
+        plt.title('Coverage Analysis: Interval Width vs Prediction Error\n(Green: in interval, Red: out of interval)')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'coverage_analysis.png'), dpi=150)
+        plt.close()
+        print(f"   ✅ Coverage 分析图已保存")
+        
+        # 3. 改进的置信区间图：标记超出区间的样本
+        plt.figure(figsize=(12, 8))
+        # 绘制置信区间（阴影区域）
+        plt.fill_between(y_true_sorted, y_pred_low_sorted, y_pred_high_sorted, 
+                        alpha=0.3, color='blue', label=f'90% Confidence Interval')
+        
+        # 绘制中位数预测
+        plt.scatter(y_true_flat, y_pred_median, alpha=0.4, s=15, 
+                   c='blue', label='Median Prediction (in interval)')
+        
+        # 标记超出区间的样本
+        # 注意：在散点图中，X轴是真实值，Y轴是预测中位数
+        # 蓝色阴影区域：对于每个真实值(X)，从预测下界(Y)到预测上界(Y)
+        # 红色点：真实值 < 预测下界，意味着真实值在蓝色区间下方
+        # 但红色点的Y坐标是预测中位数，所以如果预测中位数在蓝色区间中上方，红色点也会在那里
+        if out_below.sum() > 0:
+            # 真实值 < 预测下界：说明模型预测的下界太高了（过于乐观）
+            # 红色点的位置：(真实值, 预测中位数)
+            # 如果预测中位数在蓝色区间中上方，红色点也会在那里
+            plt.scatter(y_true_flat[out_below], y_pred_median[out_below], 
+                       alpha=0.8, s=30, c='red', marker='v', 
+                       label=f'True < Lower Bound (真实值在区间下方, {out_below.sum()})')
+            # 用垂直线标记真实值的位置（在X轴上）
+            for i in range(min(50, out_below.sum())):  # 只显示前50个
+                idx = np.where(out_below)[0][i]
+                # 从真实值位置（完美预测线）到预测中位数
+                plt.plot([y_true_flat[idx], y_true_flat[idx]], 
+                        [y_true_flat[idx], y_pred_median[idx]], 
+                        'r-', alpha=0.2, linewidth=1)
+        
+        if out_above.sum() > 0:
+            # 真实值 > 预测上界：说明模型预测的上界太低了（过于保守）
+            plt.scatter(y_true_flat[out_above], y_pred_median[out_above], 
+                       alpha=0.8, s=30, c='orange', marker='^', 
+                       label=f'True > Upper Bound (真实值在区间上方, {out_above.sum()})')
+            # 用垂直线标记真实值的位置
+            for i in range(min(50, out_above.sum())):
+                idx = np.where(out_above)[0][i]
+                plt.plot([y_true_flat[idx], y_true_flat[idx]], 
+                        [y_true_flat[idx], y_pred_median[idx]], 
+                        'orange', alpha=0.2, linewidth=1)
+        
+        # 绘制完美预测线
+        plt.plot([y_true_flat.min(), y_true_flat.max()], 
+                 [y_true_flat.min(), y_true_flat.max()], 'k--', lw=2, label='Perfect Prediction')
+        
+        plt.xlabel('True kcat (log10)')
+        plt.ylabel('Predicted kcat (log10)')
+        plt.title(f'Confidence Interval Quality Analysis\nR²={r2_kcat:.3f}, Coverage={quantile_metrics_end["coverage"]:.1%} (Target: {(quantiles[2]-quantiles[0])*100:.1f}%)')
+        plt.legend(loc='best')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'kcat_prediction_with_ci_detailed.png'), dpi=150)
+        plt.close()
+        print(f"   ✅ 详细置信区间图已保存")
+        
+        # 4. 区间宽度 vs 真实值的关系
+        plt.figure(figsize=(10, 6))
+        plt.scatter(y_true_flat, interval_widths, alpha=0.5, s=20, c=in_interval, cmap='RdYlGn')
+        plt.xlabel('True kcat (log10)')
+        plt.ylabel('Interval Width')
+        plt.title('Interval Width vs True Value\n(Green: in interval, Red: out of interval)')
+        plt.colorbar(label='In Interval')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'interval_width_vs_true.png'), dpi=150)
+        plt.close()
+        print(f"   ✅ 区间宽度 vs 真实值图已保存")
+        
+        print("=" * 60)
     else:
         r2_kcat = r2_score(all_y_true.flatten(), all_y_pred.flatten())
         pearson_end = pearsonr(all_y_true.flatten(), all_y_pred.flatten())[0]
@@ -790,7 +960,10 @@ def train(args):
     # 4. kcat密度图
     plt.figure(figsize=(8, 7))
     true_vals = all_y_true.flatten()
-    pred_vals = all_y_pred.flatten()
+    if use_quantile:
+        pred_vals = all_y_pred[:, 1].flatten()  # 使用中位数
+    else:
+        pred_vals = all_y_pred.flatten()
     sns.kdeplot(x=true_vals, y=pred_vals, cmap="viridis", fill=True, thresh=0.05)
     plt.plot([true_vals.min(), true_vals.max()], 
              [true_vals.min(), true_vals.max()], 'r--')
@@ -864,8 +1037,13 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='L2 regularization')
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
     parser.add_argument('--loss', type=str, default='mse', choices=['mse', 'huber', 'quantile'], help='Loss function (quantile for uncertainty quantification)')
+    parser.add_argument('--loss_type', type=str, default=None, help='Deprecated: use --loss instead')
     parser.add_argument('--quantiles', type=str, default='0.05,0.5,0.95', help='Quantile levels for quantile loss (comma-separated, e.g., 0.05,0.5,0.95)')
+    parser.add_argument('--quantile_weights', type=str, default=None, help='Weights for each quantile (comma-separated, e.g., 0.2,0.6,0.2). Higher weight on median reduces conservatism.')
     parser.add_argument('--scheduler', type=str, default='none', choices=['none', 'plateau', 'cosine'], help='LR Scheduler')
+    parser.add_argument('--patience', type=int, default=10, help='Patience for ReduceLROnPlateau scheduler')
+    parser.add_argument('--max_epochs', type=int, default=None, help='Maximum number of training epochs')
+    parser.add_argument('--epochs', type=int, default=None, help='Alias for --max_epochs')
     
     # Phase 2: Pooling
     parser.add_argument('--pooling_type', type=str, default='mean', choices=['mean', 'global_attention', 'set2set'], help='Graph pooling type: mean, global_attention, or set2set')
