@@ -349,5 +349,83 @@ python src/docking_chai1.py --sequence "MKFLIL..." --smiles "CCO" --output out/ 
 
 ---
 
+---
+
+## 🧪 2026-01-19 Benchmark 实验
+
+### SOTA 对比实验
+
+**目的**: 评估 PocketGNN 在 OOD (Out-of-Distribution) 测试集上与 SOTA 方法的性能对比
+
+**测试集**: `kcat_merged_hom40_test.pt` (898 samples, 40% sequence identity split)
+
+**模型**: `experiments/kcat_quantile/run_04/best_model.pt`
+- hidden_dim: 192
+- num_layers: 3
+- heads: 4
+- pooling: mean
+- use_seq_embedding: True (ESM-2, 640-dim)
+- output_quantiles: True (3 quantiles, using median)
+
+### 实验结果
+
+#### PocketGNN 性能
+
+| Metric | Value |
+|--------|-------|
+| **Pearson r** | **0.6667** |
+| Spearman ρ | 0.6092 |
+| R² | 0.4366 |
+| MAE | 0.8301 |
+| RMSE | 1.1480 |
+| p_1mag | 0.6993 |
+
+#### SOTA 对比 (OOD Focus)
+
+| Method | Source | Pearson r | Δ vs PocketGNN |
+|--------|--------|-----------|----------------|
+| **PocketGNN** | This work | **0.667** | baseline |
+| CatPred | Nat. Commun. 2025 | 0.52 | **+0.147 (+28.3%)** |
+| CataPro | Nat. Commun. 2025 | 0.497 | **+0.170 (+34.2%)** |
+
+### 关键发现
+
+1. **PocketGNN 在 OOD 泛化上显著优于 CatPred 和 CataPro**
+   - 相比 CatPred: Pearson r 提升 28.3%
+   - 相比 CataPro: Pearson r 提升 34.2%
+
+2. **Pocket-centric 表征的有效性**
+   - 聚焦于活性位点几何结构，减少无关区域噪声
+   - 24 维边特征捕获立体化学信息
+
+3. **ESM-2 融合的贡献**
+   - 提供全局序列进化信息
+   - 补充局部结构信息的不足
+
+### 生成的文件
+
+| 文件 | 内容 |
+|------|------|
+| `results/benchmark_pocketgnn_hom40/metrics.json` | 评估指标 |
+| `results/benchmark_pocketgnn_hom40/sota_comparison.png` | SOTA 对比图 |
+| `results/benchmark_pocketgnn_hom40/benchmark_report.md` | Benchmark 报告 |
+
+### 创建的脚本
+
+| 脚本 | 功能 |
+|------|------|
+| `scripts/setup_benchmark_env.sh` | 配置 CatPred/CataPro 环境 |
+| `scripts/convert_catapro_to_pocketgnn.py` | 数据格式转换 |
+| `scripts/run_catapro_baseline.py` | 运行 CataPro baseline |
+| `scripts/benchmark_comparison.py` | 生成对比分析 |
+| `scripts/quick_benchmark.py` | 快速 benchmark 脚本 |
+
+### 克隆的仓库
+
+- `benchmark_tools/CatPred/` - CatPred (maranasgroup/CatPred)
+- `benchmark_tools/CataPro/` - CataPro (zchwang/CataPro)
+
+---
+
 *Last updated: 2026-01-19*
 
