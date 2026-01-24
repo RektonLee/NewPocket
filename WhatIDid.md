@@ -205,16 +205,29 @@ Python3 src/train.py --dataset data/processed/kcat_full_1213.pt \
 - [x] 分析当前代码结构（GNN_model.py, train.py）
 - [x] 制定改进计划与优先级
 - [x] 更新工作日志文档 (WhatIDid.md)
+- [x] 创建 `feature/hierarchical-transformer` 分支
+- [x] ✅ **完成PHPTransformer模型实现**:
+  - [x] 实现双通路GNN（几何流 + 电子流）
+  - [x] 实现Cross-Attention融合模块
+  - [x] 实现Residual Graph Transformer Blocks（Pre-norm + Residual）
+  - [x] 支持层级池化框架（当前用mean pooling作为placeholder）
+- [x] 更新train.py支持--model_type参数
+- [x] 更新metadata和wandb记录
+- [x] 提交代码: commit `0bb1348`
 
 ---
 
 ## 📝 下一步行动 (Next Actions)
 
-**今日计划 (Day 1 - 2026-01-24)**:
+**今日计划 (Day 1 - 2026-01-24 下午)**:
 1. ✅ 完成任务分析与规划
-2. ⏳ 创建 `feature/hierarchical-transformer` 分支
-3. ⏳ 实现 `PHPTransformer` 模型骨架
-4. ⏳ 实现双通路GNN（几何流+电子流）
+2. ✅ 创建 `feature/hierarchical-transformer` 分支
+3. ✅ 实现 `PHPTransformer` 模型骨架
+4. ✅ 实现双通路GNN（几何流+电子流）
+5. ⏳ **运行基准对比实验** (下一步):
+   - Baseline (PocketGNNKcatOnly) vs PHPTransformer
+   - 使用40% homology pre-split数据集
+   - 对比性能指标
 
 **预期时间线**:
 - **Week 1**: Phase 1-2 (架构升级 + Co-attention)
