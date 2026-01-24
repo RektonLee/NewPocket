@@ -572,3 +572,203 @@ class PocketGNNKcatOnly(nn.Module):
         graph_x = self.readout(x, batch)
         return graph_x
 
+
+class PHPTransformer(nn.Module):
+    """
+    Physics-informed Hierarchical Pocket Transformer
+
+    核心创新:
+    1. 双通路GNN: 几何流(距离+角度) + 电子流(元素+电荷+电子结构)
+    2. Cross-Attention融合: 两个流之间的物理交互
+    3. Residual Graph Transformer Block: Pre-norm + Residual连接
+    4. 层级池化: Atom→Residue→Pocket三级表征
+    5. Structure-Sequence Co-attention (可选ESM-2融合)
+
+    特征分配:
+    - 几何流 (Geometry Stream):
+      * 边特征: 24维 (16-dim RBF距离 + 4-dim角度 + 4-dim二面角)
+      * 节点特征: 最近邻距离 (1维)
+    - 电子流 (Electronic Stream):
+      * 节点特征: 元素onehot(10维) + 残基onehot(21维) + 是否配体(1维) + 电子结构(16维) + 原子性质(3维) = 51维
+    """
+
+    def __init__(self,
+                 node_input_dim=52,      # 总节点特征维度
+                 edge_input_dim=24,      # 边特征维度（RBF+角度+二面角）
+                 hidden_dim=256,
+                 num_layers=4,
+                 heads=4,
+                 dropout=0.1,
+                 use_seq_embedding=False,
+                 seq_embedding_dim=1280,
+                 pooling_type='hierarchical'):  # 'hierarchical' or 'mean'
+        super().__init__()
+
+        # 特征分离索引
+        # 节点特征52维 = [元素10 + 残基21 + 配体1 + 最近邻距离1 + 电子16 + 性质3]
+        self.geom_node_idx = slice(31, 32)  # 最近邻距离 (index 31)
+        self.elec_node_idx = [i for i in range(52) if i != 31]  # 除了距离的所有特征
+
+        # 边特征24维 = [RBF距离16 + 角度4 + 二面角4]
+        self.geom_edge_idx = slice(0, 24)  # 所有边特征都是几何的
+
+        # ========== 双通路编码器 ==========
+        # 几何流编码器 (只用距离特征)
+        self.geom_node_encoder = nn.Linear(1, hidden_dim // 2)
+        # 电子流编码器 (除距离外的51维特征)
+        self.elec_node_encoder = nn.Linear(51, hidden_dim // 2)
+
+        # ========== Residual Graph Transformer Blocks (双通路) ==========
+        self.geom_layers = nn.ModuleList()
+        self.elec_layers = nn.ModuleList()
+        self.layer_norms_geom = nn.ModuleList()
+        self.layer_norms_elec = nn.ModuleList()
+
+        for i in range(num_layers):
+            # 几何流: GAT with edge features (仅第一层)
+            self.geom_layers.append(
+                GATConv(hidden_dim // 2, hidden_dim // (2 * heads),
+                       heads=heads, dropout=dropout, concat=True,
+                       edge_dim=edge_input_dim if i == 0 else None)
+            )
+            # 电子流: GAT without edge features
+            self.elec_layers.append(
+                GATConv(hidden_dim // 2, hidden_dim // (2 * heads),
+                       heads=heads, dropout=dropout, concat=True)
+            )
+            # Layer Normalization for Pre-norm residual
+            self.layer_norms_geom.append(nn.LayerNorm(hidden_dim // 2))
+            self.layer_norms_elec.append(nn.LayerNorm(hidden_dim // 2))
+
+        # ========== Cross-Attention融合 (几何流 ↔ 电子流) ==========
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim // 2,
+            num_heads=heads,
+            dropout=dropout,
+            batch_first=False  # [N, B, D]
+        )
+
+        # ========== 层级池化 (Atom → Residue → Pocket) ==========
+        self.pooling_type = pooling_type
+        if pooling_type == 'hierarchical':
+            # Residue-level pooling (需要residue信息)
+            self.residue_attn_gate = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, 1)
+            )
+            # Pocket-level transformer pooling
+            self.pocket_transformer = nn.TransformerEncoderLayer(
+                d_model=hidden_dim,
+                nhead=heads,
+                dim_feedforward=hidden_dim * 2,
+                dropout=dropout,
+                batch_first=True
+            )
+            readout_dim = hidden_dim
+        else:
+            # Simple mean pooling fallback
+            readout_dim = hidden_dim
+
+        # ========== Sequence Embedding Fusion (可选) ==========
+        self.use_seq_embedding = use_seq_embedding
+        if use_seq_embedding:
+            self.seq_proj = nn.Sequential(
+                nn.Linear(seq_embedding_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            )
+            mlp_input_dim = readout_dim + hidden_dim
+        else:
+            mlp_input_dim = readout_dim
+
+        # ========== 回归头 ==========
+        self.mlp = nn.Sequential(
+            nn.LayerNorm(mlp_input_dim),
+            nn.Linear(mlp_input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 1)  # 单任务kcat预测
+        )
+
+    def forward(self, data, return_attention_weights=False):
+        x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
+
+        # ========== 特征分离 ==========
+        x_geom = x[:, self.geom_node_idx]  # [N, 1] 最近邻距离
+        x_elec = x[:, self.elec_node_idx]  # [N, 51] 电子+元素+残基特征
+
+        # ========== 双通路编码 ==========
+        h_geom = self.geom_node_encoder(x_geom)  # [N, hidden_dim//2]
+        h_elec = self.elec_node_encoder(x_elec)  # [N, hidden_dim//2]
+
+        # ========== Residual Graph Transformer Blocks ==========
+        for i, (geom_layer, elec_layer, ln_geom, ln_elec) in enumerate(
+            zip(self.geom_layers, self.elec_layers, self.layer_norms_geom, self.layer_norms_elec)
+        ):
+            # Pre-norm + Residual (几何流)
+            h_geom_res = h_geom
+            h_geom = ln_geom(h_geom)
+            if i == 0:
+                h_geom = geom_layer(h_geom, edge_index, edge_attr=edge_attr)
+            else:
+                h_geom = geom_layer(h_geom, edge_index)
+            h_geom = F.elu(h_geom) + h_geom_res  # Residual
+
+            # Pre-norm + Residual (电子流)
+            h_elec_res = h_elec
+            h_elec = ln_elec(h_elec)
+            h_elec = elec_layer(h_elec, edge_index)
+            h_elec = F.elu(h_elec) + h_elec_res  # Residual
+
+        # ========== Cross-Attention融合 (几何 → 电子, 电子 → 几何) ==========
+        # 形状转换: [N, D] -> [N, 1, D] (作为序列长度为N的batch)
+        h_geom_unsqueezed = h_geom.unsqueeze(1)  # [N, 1, D]
+        h_elec_unsqueezed = h_elec.unsqueeze(1)  # [N, 1, D]
+
+        # Cross-attention: 几何作为query，电子作为key/value
+        h_geom_attn, _ = self.cross_attn(
+            h_geom_unsqueezed.transpose(0, 1),  # [1, N, D]
+            h_elec_unsqueezed.transpose(0, 1),  # [1, N, D]
+            h_elec_unsqueezed.transpose(0, 1)   # [1, N, D]
+        )
+        h_geom_attn = h_geom_attn.transpose(0, 1).squeeze(1)  # [N, D]
+
+        # Cross-attention: 电子作为query，几何作为key/value
+        h_elec_attn, _ = self.cross_attn(
+            h_elec_unsqueezed.transpose(0, 1),
+            h_geom_unsqueezed.transpose(0, 1),
+            h_geom_unsqueezed.transpose(0, 1)
+        )
+        h_elec_attn = h_elec_attn.transpose(0, 1).squeeze(1)  # [N, D]
+
+        # 融合两个流
+        h_unified = torch.cat([h_geom_attn, h_elec_attn], dim=1)  # [N, hidden_dim]
+
+        # ========== 层级池化 ==========
+        if self.pooling_type == 'hierarchical':
+            # TODO: 实现真正的层级池化（需要residue信息）
+            # 当前使用全局平均池化作为placeholder
+            graph_x = global_mean_pool(h_unified, batch)
+        else:
+            graph_x = global_mean_pool(h_unified, batch)
+
+        # ========== Sequence Embedding融合 (Late Fusion) ==========
+        if self.use_seq_embedding and hasattr(data, 'seq_embedding'):
+            seq_emb = data.seq_embedding
+            seq_x = self.seq_proj(seq_emb)
+            combined_x = torch.cat([graph_x, seq_x], dim=1)
+        else:
+            combined_x = graph_x
+
+        # ========== 回归预测 ==========
+        out = self.mlp(combined_x)
+
+        if torch.isnan(out).any():
+            raise ValueError("模型输出包含 NaN 值")
+
+        return out

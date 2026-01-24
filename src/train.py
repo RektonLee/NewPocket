@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import os
 import numpy as np
+import json
 from torch_geometric.loader import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import GNN_model as MD
@@ -89,12 +90,144 @@ def compute_metrics(y_true_log, y_pred_log):
         'Pearson': pearson_val
     }
 
+def parse_split_ratios(ratio_str):
+    parts = [p.strip() for p in ratio_str.split(",") if p.strip()]
+    ratios = [float(p) for p in parts]
+    if len(ratios) not in (2, 3):
+        raise ValueError(f"split_ratios must have 2 or 3 values, got: {ratio_str}")
+    total = sum(ratios)
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError(f"split_ratios must sum to 1.0, got sum={total:.4f}")
+    return ratios
+
+def read_mmseqs_tsv(tsv_path):
+    member_to_rep = {}
+    with open(tsv_path, "r") as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) >= 2:
+                rep = parts[0]
+                mem = parts[1]
+                member_to_rep[mem] = rep
+    return member_to_rep
+
+def make_cluster_ids(member_to_rep):
+    reps = sorted(set(member_to_rep.values()))
+    rep_to_cid = {rep: i for i, rep in enumerate(reps)}
+    member_to_cid = {m: rep_to_cid[rep] for m, rep in member_to_rep.items()}
+    return member_to_cid, rep_to_cid
+
+def split_clusters(rep_to_cid, seed=42, ratios=(0.8, 0.1, 0.1)):
+    assert abs(sum(ratios) - 1.0) < 1e-6
+    cids = list(rep_to_cid.values())
+    rng = np.random.default_rng(seed)
+    rng.shuffle(cids)
+    n = len(cids)
+    n_train = int(n * ratios[0])
+    n_val = int(n * ratios[1])
+    train_c = set(cids[:n_train])
+    val_c = set(cids[n_train:n_train + n_val])
+    test_c = set(cids[n_train + n_val:])
+    return train_c, val_c, test_c
+
+def split_dataset_by_clusters(dataset, member_to_cid, train_c, val_c, test_c):
+    train, val, test, missing = [], [], [], 0
+    for d in dataset:
+        sid = getattr(d, "sample_id", None)
+        if sid is None:
+            raise ValueError("Data object missing sample_id; cannot do homology split.")
+        if sid not in member_to_cid:
+            missing += 1
+            continue
+        cid = member_to_cid[sid]
+        if cid in train_c:
+            train.append(d)
+        elif cid in val_c:
+            val.append(d)
+        else:
+            test.append(d)
+    return train, val, test, missing
+
+def load_dataset_list(path, label):
+    if not path:
+        return []
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"{label} dataset not found: {path}")
+    print(f"Loading {label} dataset from {path}...")
+    return torch.load(path, weights_only=False)
+
+def assign_seq_embeddings(data_list, embeddings_map, seq_embedding_dim):
+    matched_count = 0
+    unmatched_samples = []
+    for data in data_list:
+        key = None
+        embedding = None
+        key_type = None
+
+        if hasattr(data, 'sample_id') and data.sample_id is not None:
+            key = str(data.sample_id)
+            key_type = 'sample_id'
+        elif hasattr(data, 'pdb_id') and data.pdb_id is not None:
+            key = str(data.pdb_id)
+            key_type = 'pdb_id'
+            if key not in embeddings_map and '.' in key:
+                key = key.split('.')[0]
+        elif hasattr(data, 'uniprot_id') and data.uniprot_id is not None:
+            key = str(data.uniprot_id)
+            key_type = 'uniprot_id'
+
+        if key and key in embeddings_map:
+            embedding = embeddings_map[key]
+        elif key:
+            if len(unmatched_samples) < 5:
+                unmatched_samples.append((key, key_type))
+
+        if embedding is not None:
+            if not isinstance(embedding, torch.Tensor):
+                embedding = torch.tensor(embedding, dtype=torch.float)
+            if seq_embedding_dim == 0:
+                seq_embedding_dim = embedding.shape[0]
+                print(f"Sequence embedding dimension: {seq_embedding_dim}")
+            data.seq_embedding = embedding.unsqueeze(0)
+            matched_count += 1
+
+    return seq_embedding_dim, matched_count, unmatched_samples
+
+def remove_string_metadata(data_list):
+    for data in data_list:
+        if hasattr(data, 'ec'):
+            delattr(data, 'ec')
+        if hasattr(data, 'pdb_id'):
+            delattr(data, 'pdb_id')
+        if hasattr(data, 'sample_id'):
+            delattr(data, 'sample_id')
+        if hasattr(data, 'uniprot_id'):
+            delattr(data, 'uniprot_id')
+
+def fill_missing_seq_embeddings(data_list, seq_embedding_dim):
+    if seq_embedding_dim <= 0:
+        return 0
+    missing_count = 0
+    for data in data_list:
+        if not hasattr(data, 'seq_embedding'):
+            data.seq_embedding = torch.zeros((1, seq_embedding_dim), dtype=torch.float)
+            missing_count += 1
+    return missing_count
+
 def train(args):
     dataset_path = args.dataset
+    if args.train_dataset:
+        dataset_path = args.train_dataset
     save_dir = args.save_dir
     batch_size = 32 # defaults if not in args, but usually controlled by loop or constant
     lr = 5e-4  # ⚡ 对于大模型，使用更小的学习率
     max_epochs = 500  # 默认训练轮数
+
+    split_strategy = "random"
+    if args.train_dataset:
+        split_strategy = "pre_split"
+    elif args.cluster_tsv:
+        split_strategy = "cluster"
     
     # Check if we should override defaults with args
     if hasattr(args, 'batch_size'): batch_size = args.batch_size
@@ -122,7 +255,8 @@ def train(args):
     # 获取实验名称和 run_id（通过 save_metadata，它会自动管理 experiments/ 目录）
     # 如果用户没有指定 exp_name，使用默认值
     exp_name = getattr(args, 'exp_name', 'kcat_default')
-    
+    model_type = getattr(args, 'model_type', 'PocketGNNKcatOnly')  # 向后兼容
+
     # ⚡ 简化目录结构：统一使用 experiments/exp_name/run_id 作为 save_dir
     # 这样所有文件（模型、图像、元数据）都在一个地方，不需要 outputs/ 和 experiments/ 两个目录
     # 先调用 save_metadata 创建实验记录
@@ -131,8 +265,8 @@ def train(args):
         dataset_path=dataset_path,
         exp_name=exp_name,
         graph_builder_version='enhanced_builder',
-        gnn_model_version='PocketGNNKcatOnly',
-        comments=f'Enhanced: pooling={args.pooling_type}, seq_emb={args.use_seq_embedding}, loss={args.loss}, wd={args.weight_decay}'
+        gnn_model_version=model_type,  # 使用实际的模型类型
+        comments=f'Model={model_type}, pooling={args.pooling_type}, seq_emb={args.use_seq_embedding}, loss={args.loss}, wd={args.weight_decay}'
     )
     
     # 从 experiments 目录读取实际的 run_dir 路径
@@ -156,8 +290,9 @@ def train(args):
     wandb.login(key="46dbe55e52d029976ffa0e29c90f0d32410e1504")
     
     # 创建 wandb config 字典
+    dataset_name = os.path.basename(dataset_path) if dataset_path else "custom_split"
     wandb_config = {
-        "dataset": os.path.basename(dataset_path),
+        "dataset": dataset_name,
         "batch_size": batch_size,
         "lr": lr,
         "max_epochs": max_epochs,
@@ -168,18 +303,31 @@ def train(args):
         "scheduler": args.scheduler,
         "pooling_type": args.pooling_type,
         "use_seq_embedding": args.use_seq_embedding,
+        "model_type": model_type,  # 记录模型类型
+        "hidden_dim": hidden_dim,
+        "num_layers": num_layers,
+        "heads": heads,
+        "split_strategy": split_strategy,
+        "train_dataset": args.train_dataset,
+        "val_dataset": args.val_dataset,
+        "test_dataset": args.test_dataset,
+        "cluster_tsv": args.cluster_tsv,
+        "split_ratios": args.split_ratios,
+        "split_seed": args.split_seed,
         "exp_name": exp_name,
         "run_id": run_id,
         "save_dir": save_dir,
     }
-    
+
     # 创建 tags 用于在 wandb 界面快速筛选
     # 基于关键参数生成 tags，方便在 wandb 中快速找到对应的 run
     tags = [
+        f"model_{model_type}",
         f"pooling_{args.pooling_type}",
         f"scheduler_{args.scheduler}",
         f"loss_{args.loss}",
     ]
+    tags.append(f"split_{split_strategy}")
     if args.use_seq_embedding:
         tags.append("with_seq_emb")
     else:
@@ -222,7 +370,15 @@ def train(args):
         f.write(f"WandB Run Name: {wandb_run_name}\n")
         f.write(f"\n--- Dataset ---\n")
         f.write(f"Dataset Path: {dataset_path}\n")
-        f.write(f"Dataset Name: {os.path.basename(dataset_path)}\n")
+        if dataset_path:
+            f.write(f"Dataset Name: {os.path.basename(dataset_path)}\n")
+        f.write(f"Split Strategy: {split_strategy}\n")
+        f.write(f"Train Dataset: {args.train_dataset}\n")
+        f.write(f"Val Dataset: {args.val_dataset}\n")
+        f.write(f"Test Dataset: {args.test_dataset}\n")
+        f.write(f"Cluster TSV: {args.cluster_tsv}\n")
+        f.write(f"Split Ratios: {args.split_ratios}\n")
+        f.write(f"Split Seed: {args.split_seed}\n")
         f.write(f"\n--- Model Architecture ---\n")
         f.write(f"Pooling Type: {args.pooling_type}\n")
         f.write(f"Use Seq Embedding: {args.use_seq_embedding}\n")
@@ -246,12 +402,48 @@ def train(args):
         f.write("\n" + "=" * 60 + "\n")
     print(f"✅ Training configuration saved to: {config_file}")
 
-    print(f"Loading dataset from {dataset_path}...")
-    try:
-        data_list = torch.load(dataset_path, weights_only=False)  # List[Data]
-    except Exception as e:
-        print(f"Error loading dataset: {e}")
-        return
+    train_list = []
+    val_list = []
+    test_list = []
+
+    if args.train_dataset:
+        train_list = load_dataset_list(args.train_dataset, "train")
+        val_list = load_dataset_list(args.val_dataset, "val") if args.val_dataset else []
+        test_list = load_dataset_list(args.test_dataset, "test") if args.test_dataset else []
+    else:
+        if not dataset_path:
+            raise ValueError("No dataset provided. Use --dataset or --train_dataset.")
+        try:
+            data_list = load_dataset_list(dataset_path, "full")
+        except Exception as e:
+            print(f"Error loading dataset: {e}")
+            return
+
+        ratios = parse_split_ratios(args.split_ratios)
+        if args.cluster_tsv:
+            if len(ratios) == 2:
+                ratios = (ratios[0], ratios[1] / 2.0, ratios[1] / 2.0)
+                print(f"Cluster split: expanding ratios to train/val/test = {ratios}")
+            member_to_rep = read_mmseqs_tsv(args.cluster_tsv)
+            member_to_cid, rep_to_cid = make_cluster_ids(member_to_rep)
+            train_c, val_c, test_c = split_clusters(rep_to_cid, seed=args.split_seed, ratios=ratios)
+            train_list, val_list, test_list, missing = split_dataset_by_clusters(
+                data_list, member_to_cid, train_c, val_c, test_c
+            )
+            if missing > 0:
+                print(f"Warning: {missing} samples missing in cluster table; dropped to avoid leakage.")
+        else:
+            rng = np.random.default_rng(args.split_seed)
+            rng.shuffle(data_list)
+            train_ratio = ratios[0]
+            val_ratio = ratios[1]
+            test_ratio = ratios[2] if len(ratios) == 3 else 0.0
+            n = len(data_list)
+            train_end = int(n * train_ratio)
+            val_end = train_end + int(n * val_ratio)
+            train_list = data_list[:train_end]
+            val_list = data_list[train_end:val_end]
+            test_list = data_list[val_end:] if test_ratio > 0 else []
 
     # 注意：Data 对象可能包含字符串类型的元数据属性（如 ec, pdb_id, sample_id）
     # 这些属性在匹配 embeddings 时需要，但在 DataLoader collate 时会出错
@@ -278,7 +470,8 @@ def train(args):
         
         # Check what IDs are available in data (for debugging)
         sample_data_ids = []
-        for i, data in enumerate(data_list[:5]):
+        sample_pool = (train_list + val_list + test_list)
+        for data in sample_pool[:5]:
             ids = {}
             if hasattr(data, 'sample_id'):
                 ids['sample_id'] = data.sample_id
@@ -291,77 +484,39 @@ def train(args):
         
         matched_count = 0
         unmatched_samples = []
-        for data in data_list:
-            # Key matching logic: try sample_id first (as per instructions "sample_id 对齐")
-            # Then try pdb_id, uniprot_id as fallback
-            key = None
-            embedding = None
-            key_type = None
-            
-            # Priority: sample_id > pdb_id > uniprot_id
-            if hasattr(data, 'sample_id') and data.sample_id is not None:
-                key = str(data.sample_id)
-                key_type = 'sample_id'
-            elif hasattr(data, 'pdb_id') and data.pdb_id is not None:
-                key = str(data.pdb_id)
-                key_type = 'pdb_id'
-                # pdb_id might have format like "kcat_000002_61151_10A.pdb", try without extension
-                if key not in embeddings_map and '.' in key:
-                    key = key.split('.')[0]
-            elif hasattr(data, 'uniprot_id') and data.uniprot_id is not None:
-                key = str(data.uniprot_id)
-                key_type = 'uniprot_id'
-            
-            if key and key in embeddings_map:
-                embedding = embeddings_map[key]
-            elif key:
-                # Record unmatched for debugging (only first few)
-                if len(unmatched_samples) < 5:
-                    unmatched_samples.append((key, key_type))
+        for label, data_list in (("train", train_list), ("val", val_list), ("test", test_list)):
+            if not data_list:
+                continue
+            seq_embedding_dim, count, unmatched = assign_seq_embeddings(
+                data_list, embeddings_map, seq_embedding_dim
+            )
+            matched_count += count
+            if unmatched:
+                unmatched_samples.extend(unmatched)
 
-            if embedding is not None:
-                # Ensure it's a tensor
-                if not isinstance(embedding, torch.Tensor):
-                    embedding = torch.tensor(embedding, dtype=torch.float)
-                
-                # Check dim
-                if seq_embedding_dim == 0:
-                    seq_embedding_dim = embedding.shape[0]
-                    print(f"Sequence embedding dimension: {seq_embedding_dim}")
-                
-                data.seq_embedding = embedding.unsqueeze(0) # [1, dim] for batching
-                matched_count += 1
-
-        print(f"Matched embeddings for {matched_count}/{len(data_list)} samples.")
+        total_samples = len(train_list) + len(val_list) + len(test_list)
+        print(f"Matched embeddings for {matched_count}/{total_samples} samples.")
         if unmatched_samples:
-            print(f"Sample unmatched keys: {unmatched_samples}")
-        
-        # If we didn't find any, we can't proceed with seq embedding
+            print(f"Sample unmatched keys: {unmatched_samples[:5]}")
+
         if matched_count == 0:
             print("Warning: No embeddings matched! Disabling sequence embedding.")
+            args.use_seq_embedding = False
             seq_embedding_dim = 0
     
     # 移除字符串类型的元数据属性，避免 DataLoader collate 时出错
     # PyTorch Geometric 的 Batch.from_data_list 无法处理字符串属性
     print("Removing string metadata attributes to avoid collate errors...")
-    for data in data_list:
-        # 移除字符串属性（这些无法转换为 tensor）
-        if hasattr(data, 'ec'):
-            delattr(data, 'ec')
-        if hasattr(data, 'pdb_id'):
-            delattr(data, 'pdb_id')
-        if hasattr(data, 'sample_id'):
-            delattr(data, 'sample_id')
-        if hasattr(data, 'uniprot_id'):
-            delattr(data, 'uniprot_id')
+    remove_string_metadata(train_list)
+    remove_string_metadata(val_list)
+    remove_string_metadata(test_list)
     
     # 如果启用了seq_embedding但某些样本没有匹配到，用零向量填充
     if args.use_seq_embedding and seq_embedding_dim > 0:
         missing_count = 0
-        for data in data_list:
-            if not hasattr(data, 'seq_embedding'):
-                data.seq_embedding = torch.zeros((1, seq_embedding_dim), dtype=torch.float)
-                missing_count += 1
+        missing_count += fill_missing_seq_embeddings(train_list, seq_embedding_dim)
+        missing_count += fill_missing_seq_embeddings(val_list, seq_embedding_dim)
+        missing_count += fill_missing_seq_embeddings(test_list, seq_embedding_dim)
         if missing_count > 0:
             print(f"Warning: {missing_count} samples missing seq_embedding, filled with zeros.")
 
@@ -370,17 +525,17 @@ def train(args):
     writer = SummaryWriter(save_dir)
 
     # === Load dataset ===
-    # data_list already loaded
-    print(data_list[0])  # 打印第一个图数据
-    
-    np.random.shuffle(data_list)
-    split = int(0.8 * len(data_list))
-    train_loader = DataLoader(data_list[:split], batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(data_list[split:], batch_size=batch_size)
+    if not train_list or not val_list:
+        raise ValueError("Train/val split resulted in empty set. Check split ratios and data.")
+    print(train_list[0])  # 打印第一个图数据
+
+    train_loader = DataLoader(train_list, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_list, batch_size=batch_size)
+    test_loader = DataLoader(test_list, batch_size=batch_size) if test_list else None
 
     # === Initialize model ===
-    node_input_dim = data_list[0].x.shape[1] #default 52
-    edge_input_dim = data_list[0].edge_attr.shape[1]  # 现在应该是24维
+    node_input_dim = train_list[0].x.shape[1] #default 52
+    edge_input_dim = train_list[0].edge_attr.shape[1]  # 现在应该是24维
     print(f"Node input dim: {node_input_dim}, Edge input dim: {edge_input_dim}")
     
     # 使用新的kcat专用模型
@@ -404,20 +559,41 @@ def train(args):
     else:
         quantiles = None
         quantile_weights = None
-    
-    model = MD.PocketGNNKcatOnly(
-        node_input_dim=node_input_dim,
-        edge_input_dim=edge_input_dim,
-        hidden_dim=hidden_dim,
-        num_layers=num_layers,
-        heads=heads,
-        dropout=dropout,
-        pooling_type=args.pooling_type,
-        use_seq_embedding=args.use_seq_embedding,
-        seq_embedding_dim=seq_embedding_dim if args.use_seq_embedding else 0,
-        output_quantiles=use_quantile
-    ).to(device)
-    
+
+    # ========== 模型选择与初始化 ==========
+    model_type = getattr(args, 'model_type', 'PocketGNNKcatOnly')  # 向后兼容
+
+    if model_type == 'PHPTransformer':
+        print(f"🔬 Using PHPTransformer (Physics-informed Hierarchical Pocket Transformer)")
+        print(f"   - Dual-stream GNN (Geometry + Electronic)")
+        print(f"   - Cross-Attention Fusion")
+        print(f"   - Residual Graph Transformer Blocks")
+        model = MD.PHPTransformer(
+            node_input_dim=node_input_dim,
+            edge_input_dim=edge_input_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            heads=heads,
+            dropout=dropout,
+            use_seq_embedding=args.use_seq_embedding,
+            seq_embedding_dim=seq_embedding_dim if args.use_seq_embedding else 0,
+            pooling_type='mean'  # PHPTransformer目前只支持mean pooling
+        ).to(device)
+    else:
+        print(f"📊 Using {model_type} (Baseline single-stream GAT)")
+        model = MD.PocketGNNKcatOnly(
+            node_input_dim=node_input_dim,
+            edge_input_dim=edge_input_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            heads=heads,
+            dropout=dropout,
+            pooling_type=args.pooling_type,
+            use_seq_embedding=args.use_seq_embedding,
+            seq_embedding_dim=seq_embedding_dim if args.use_seq_embedding else 0,
+            output_quantiles=use_quantile
+        ).to(device)
+
     # === Phase 1: Optimizer & Loss & Scheduler ===
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=args.weight_decay)
     
@@ -972,6 +1148,61 @@ def train(args):
     plt.title('kcat: Density Plot')
     plt.savefig(os.path.join(save_dir, 'kcat_density.png'))
     plt.close()
+
+    # 5. Test set evaluation (optional)
+    test_metrics = None
+    if test_loader is not None:
+        model.eval()
+        test_true = []
+        test_pred = []
+        with torch.no_grad():
+            for batch in test_loader:
+                batch = batch.to(device)
+                batch_size = batch.num_graphs
+                if batch.y.shape[0] == batch_size:
+                    log_y = batch.y.reshape(batch_size, 1)
+                else:
+                    y_reshaped = batch.y.reshape(batch_size, 2)
+                    log_y = y_reshaped[:, 0:1]
+                out = model(batch)
+                out = torch.clamp(out, min=-10.0, max=10.0)
+                test_true.append(log_y.cpu())
+                test_pred.append(out.cpu())
+
+        if test_true and test_pred:
+            test_true = torch.cat(test_true, dim=0)
+            test_pred = torch.cat(test_pred, dim=0)
+            if use_quantile:
+                test_pred_median = test_pred[:, 1:2]
+                test_metrics = compute_metrics(test_true, test_pred_median)
+                test_metrics.update(compute_quantile_metrics(test_pred, test_true, quantiles=quantiles))
+                test_pred_plot = test_pred_median.numpy().flatten()
+            else:
+                test_metrics = compute_metrics(test_true, test_pred)
+                test_pred_plot = test_pred.numpy().flatten()
+
+            test_true_plot = test_true.numpy().flatten()
+            plt.figure(figsize=(8, 6))
+            plt.scatter(test_true_plot, test_pred_plot, alpha=0.6)
+            plt.plot([test_true_plot.min(), test_true_plot.max()],
+                     [test_true_plot.min(), test_true_plot.max()], 'r--')
+            plt.xlabel('True kcat (log10)')
+            plt.ylabel('Predicted kcat (log10)')
+            plt.title(f'Test: True vs Predicted (R² = {test_metrics["R2"]:.3f})')
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, 'kcat_prediction_scatter_test.png'))
+            plt.close()
+
+            with open(os.path.join(save_dir, 'test_metrics.json'), "w") as f:
+                json.dump(test_metrics, f, indent=2)
+
+            wandb.log({
+                "test/R2": test_metrics["R2"],
+                "test/Pearson": test_metrics["Pearson"],
+                "test/MAE": test_metrics["MAE"],
+                "test/RMSE": test_metrics["RMSE"]
+            })
     
     # 保存最终指标到文件
     metrics_df = pd.DataFrame({
@@ -993,6 +1224,13 @@ def train(args):
         final_log.update({
             "final/coverage": quantile_metrics_end['coverage'],
             "final/interval_width": quantile_metrics_end['interval_width']
+        })
+    if test_metrics:
+        final_log.update({
+            "final/test_r2": test_metrics.get("R2"),
+            "final/test_pearson": test_metrics.get("Pearson"),
+            "final/test_mae": test_metrics.get("MAE"),
+            "final/test_rmse": test_metrics.get("RMSE")
         })
     wandb.log(final_log)
     
@@ -1021,6 +1259,12 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default="kcat_train_after_new_clean.pt", help='Path to .pt dataset')
+    parser.add_argument('--train_dataset', type=str, default=None, help='Optional pre-split train .pt dataset')
+    parser.add_argument('--val_dataset', type=str, default=None, help='Optional pre-split val .pt dataset')
+    parser.add_argument('--test_dataset', type=str, default=None, help='Optional pre-split test .pt dataset')
+    parser.add_argument('--cluster_tsv', type=str, default=None, help='MMseqs2 cluster TSV for homology-aware split')
+    parser.add_argument('--split_ratios', type=str, default="0.8,0.2", help='Split ratios (train,val[,test]), must sum to 1.0')
+    parser.add_argument('--split_seed', type=int, default=42, help='Random seed for data splitting')
     parser.add_argument('--save_dir', type=str, default='outputs/kcat_after_new')
     
     # ========== 实验命名参数 ==========
@@ -1053,6 +1297,9 @@ if __name__ == '__main__':
     parser.add_argument('--seq_embedding_path', type=str, default='data/esm_embeddings.pt', help='Path to ESM embeddings dictionary')
     
     # Model Architecture Hyperparameters
+    parser.add_argument('--model_type', type=str, default='PocketGNNKcatOnly',
+                       choices=['PocketGNNKcatOnly', 'PHPTransformer'],
+                       help='Model architecture: PocketGNNKcatOnly (baseline) or PHPTransformer (dual-stream hierarchical)')
     parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension')
     parser.add_argument('--num_layers', type=int, default=3, help='Number of GNN layers')
     parser.add_argument('--heads', type=int, default=4, help='Number of attention heads')
