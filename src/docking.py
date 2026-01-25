@@ -26,6 +26,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from Bio.PDB import PDBParser, Select, PDBIO
 import hashlib
+import json
 import shutil
 import logging
 from typing import Optional, Tuple, Dict
@@ -213,8 +214,17 @@ def smiles_to_sdf(smiles, outfile):
     if mol is None:
         raise ValueError(f"无法解析 SMILES: {smiles}")
     mol = Chem.AddHs(mol)
-    AllChem.EmbedMolecule(mol, randomSeed=0xf00d)
-    AllChem.UFFOptimizeMolecule(mol)
+    try:
+        params = AllChem.ETKDGv3()
+        params.randomSeed = 0xf00d
+        params.useSmallRingTorsions = True
+        params.useBasicKnowledge = True
+        AllChem.EmbedMolecule(mol, params)
+        AllChem.UFFOptimizeMolecule(mol)
+    except Exception:
+        # Fallback to standard embedding if ETKDG fails
+        AllChem.EmbedMolecule(mol, randomSeed=0xf00d)
+        AllChem.UFFOptimizeMolecule(mol)
     writer = Chem.SDWriter(outfile)
     writer.write(mol)
     writer.close()
@@ -529,12 +539,13 @@ def run_diffdock(protein_pdb: str,
         # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
         
-        # 方法1: 尝试使用CSV文件方式（DiffDock推荐方式）
+        # 方法1: 使用CSV文件方式（DiffDock推荐方式）
         # 创建临时CSV文件
+        complex_name = os.path.splitext(os.path.basename(protein_pdb))[0]
         csv_file = os.path.join(output_dir, "diffdock_input.csv")
         with open(csv_file, 'w') as f:
-            f.write("protein_path,ligand_path\n")
-            f.write(f"{os.path.abspath(protein_pdb)},{os.path.abspath(ligand_sdf)}\n")
+            f.write("complex_name,protein_path,ligand_description,protein_sequence\n")
+            f.write(f"{complex_name},{os.path.abspath(protein_pdb)},{os.path.abspath(ligand_sdf)},\n")
         
         # 查找 DiffDock inference 脚本
         possible_scripts = [
@@ -549,8 +560,7 @@ def run_diffdock(protein_pdb: str,
                 # 使用inference.py脚本
                 cmd = [
                     python_exec, script_path,
-                    "--protein_path", os.path.abspath(protein_pdb),
-                    "--ligand_path", os.path.abspath(ligand_sdf),
+                    "--protein_ligand_csv", os.path.abspath(csv_file),
                     "--out_dir", os.path.abspath(output_dir),
                     "--inference_steps", str(inference_steps),
                     "--samples_per_complex", str(samples_per_complex)
@@ -562,8 +572,7 @@ def run_diffdock(protein_pdb: str,
             # 尝试使用命令行模块
             cmd = [
                 python_exec, "-m", "diffdock.dock",
-                "--protein_path", os.path.abspath(protein_pdb),
-                "--ligand_path", os.path.abspath(ligand_sdf),
+                "--protein_ligand_csv", os.path.abspath(csv_file),
                 "--out_dir", os.path.abspath(output_dir),
                 "--inference_steps", str(inference_steps),
                 "--samples_per_complex", str(samples_per_complex)
@@ -610,14 +619,19 @@ def run_diffdock(protein_pdb: str,
         logger.info(f"   {'='*60}")
         logger.info(f"✅ DiffDock completed")
         
-        # 查找最佳 pose
-        best_pose = _find_best_pose(output_dir)
+        # 查找最佳 pose（DiffDock 输出通常在 out_dir/complex_name）
+        search_dir = os.path.join(output_dir, complex_name)
+        if os.path.isdir(search_dir):
+            best_pose = _find_best_pose(search_dir)
+        else:
+            best_pose = _find_best_pose(output_dir)
         
         if best_pose is None:
             raise FileNotFoundError(
                 f"❌ DiffDock did not generate output files\n"
                 f"   Output dir: {output_dir}\n"
-                f"   Contents: {os.listdir(output_dir) if os.path.exists(output_dir) else 'not exists'}"
+                f"   Contents: {os.listdir(output_dir) if os.path.exists(output_dir) else 'not exists'}\n"
+                f"   Searched: {search_dir if os.path.isdir(search_dir) else output_dir}"
             )
         
         # 可选：验证 pose
@@ -656,22 +670,39 @@ def _find_best_pose(output_dir: str) -> Optional[str]:
     从 DiffDock 输出目录中查找最佳 pose
     
     查找优先级：
-    1. rank1_*.sdf
-    2. confidence 最高的文件
+    1. confidence 最高的文件（如果存在 confidence 输出）
+    2. rank1_*.sdf
     3. 任何 .sdf 文件
     """
     if not os.path.exists(output_dir):
         return None
     
+    import re
     sdf_files = []
+    rank1_path = None
+    best_conf = None
+    best_conf_path = None
     for f in os.listdir(output_dir):
         if f.endswith('.sdf'):
             file_path = os.path.join(output_dir, f)
-            # rank1 优先
+            m = re.search(r"confidence(-?\d+(?:\.\d+)?)", f)
+            if m:
+                try:
+                    conf = float(m.group(1))
+                    if best_conf is None or conf > best_conf:
+                        best_conf = conf
+                        best_conf_path = file_path
+                except ValueError:
+                    pass
             if 'rank1' in f.lower() or 'rank_1' in f.lower():
-                return file_path
+                rank1_path = file_path
             sdf_files.append((f, file_path))
     
+    if best_conf_path:
+        return best_conf_path
+    if rank1_path:
+        return rank1_path
+
     # 按文件名排序（通常 confidence 较高的排前面）
     sdf_files.sort(key=lambda x: x[0])
     
@@ -687,7 +718,9 @@ def run_preprocess(uniprot_id: str,
                    output_pocket_path: str, 
                    index: int,
                    gpu_id: Optional[int] = None,
-                   validate_pose: bool = True) -> bool:
+                   validate_pose: bool = True,
+                   persist_dir: Optional[str] = None,
+                   keep_tmp_dir: bool = False) -> bool:
     """
     使用 DiffDock 进行分子对接和口袋提取
     
@@ -711,6 +744,8 @@ def run_preprocess(uniprot_id: str,
     # 确保路径是绝对路径
     prot_pdb_path = os.path.abspath(prot_pdb_path)
     output_pocket_path = os.path.abspath(output_pocket_path)
+    if persist_dir:
+        persist_dir = os.path.abspath(persist_dir)
     
     os.chdir(tmp_dir)
 
@@ -744,6 +779,43 @@ def run_preprocess(uniprot_id: str,
         if docked_ligand_sdf is None:
             raise RuntimeError("DiffDock failed to generate pose")
         
+        # 如果需要保留中间结果，复制 DiffDock 输出
+        if persist_dir:
+            os.makedirs(persist_dir, exist_ok=True)
+            try:
+                import re
+                complex_dir = os.path.join(
+                    diffdock_output_dir,
+                    os.path.splitext(os.path.basename(clean_pdb_path))[0]
+                )
+                copy_src = complex_dir if os.path.isdir(complex_dir) else diffdock_output_dir
+                sdf_files = []
+                confidence_map = {}
+                for fname in os.listdir(copy_src):
+                    if fname.endswith(".sdf"):
+                        sdf_files.append(fname)
+                        m = re.search(r"confidence(-?\d+(?:\.\d+)?)", fname)
+                        if m:
+                            try:
+                                confidence_map[fname] = float(m.group(1))
+                            except ValueError:
+                                pass
+                        shutil.copyfile(os.path.join(copy_src, fname), os.path.join(persist_dir, fname))
+                sdf_files.sort()
+                confidences = [confidence_map[f] for f in sdf_files if f in confidence_map]
+                best_confidence = confidence_map.get(os.path.basename(docked_ligand_sdf))
+                meta = {
+                    "best_pose": os.path.basename(docked_ligand_sdf),
+                    "sdf_files": sdf_files,
+                    "confidence_values": confidences,
+                    "confidence_map": confidence_map,
+                    "best_confidence": best_confidence,
+                }
+                with open(os.path.join(persist_dir, "docking_meta.json"), "w") as f:
+                    json.dump(meta, f, indent=2)
+            except Exception as e:
+                logger.warning(f"Failed to persist DiffDock outputs: {e}")
+
         # SDF -> PDB
         pose_pdb = os.path.join(tmp_dir, "pose.pdb")
         if not sdf_to_pdb(docked_ligand_sdf, pose_pdb):
@@ -775,11 +847,23 @@ def run_preprocess(uniprot_id: str,
         
     finally:
         os.chdir(orig_dir)
-        # 清理临时目录
-        try:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception as cleanup_e:
-            logger.warning(f"⚠️ Failed to cleanup {tmp_dir}: {cleanup_e}")
+        # 保留或清理临时目录
+        if keep_tmp_dir:
+            if persist_dir:
+                try:
+                    keep_root = os.path.join(persist_dir, "tmp_keep")
+                    os.makedirs(keep_root, exist_ok=True)
+                    dest_dir = os.path.join(keep_root, os.path.basename(tmp_dir))
+                    if not os.path.exists(dest_dir):
+                        shutil.move(tmp_dir, dest_dir)
+                        logger.info(f"📦 Kept temp dir: {dest_dir}")
+                except Exception as keep_e:
+                    logger.warning(f"⚠️ Failed to keep temp dir {tmp_dir}: {keep_e}")
+        else:
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception as cleanup_e:
+                logger.warning(f"⚠️ Failed to cleanup {tmp_dir}: {cleanup_e}")
 
 
 def _validate_smiles(smiles: str) -> bool:

@@ -254,3 +254,18 @@ Python3 src/train.py --dataset data/processed/kcat_full_1213.pt \
 ---
 
 *此文档持续更新，记录所有代码修改、实验结果和设计决策*
+
+## 2026-01-24 (补充)
+- 修复 DiffDock 调用参数（改用 protein_ligand_csv，输出目录查找支持 out_dir/complex_name），见 `src/docking.py`。
+- 修复 `scripts/redock_test_new.py` 的 CSV 列名读取逻辑（支持带空格列名），并成功跑通 `--limit 1` 的 DiffDock 预演，生成 `data/processed/kcat_test_new_diffdock_preview.pt`（1 条样本）。
+- 完成 DiffDock 输出持久化与置信度解析：在 `sample_data/.../docking/diffdock_output/` 保存多构象 SDF + `docking_meta.json`，并把最大 confidence 写入 `data.docking_confidence`。
+- 预演成功：`scripts/redock_test_new.py --limit 1 --samples-per-complex 3 --gpu-ids 0,1` 生成 1 条样本与持久化输出。
+- `scripts/redock_test_new.py` 支持使用已有 PDB 目录（`--protein-pdb-dirs`）并可禁用 ESMFold（`--no-esmfold`），避免重复预测。
+- `scripts/redock_test_new.py` 增加预筛选（仅对确有 PDB 的样本做 docking），并将 RDKit 失败的 SMILES 追加到 `logs/rdkit_failed_smiles.txt`。
+- `src/docking.py` 用 ETKDGv3 做 3D 嵌入并保留 fallback，提高 RDKit 构象成功率。
+- 2026-01-25：小规模验证（limit=5）完成，成功 4/5；全量重对接已后台启动，日志：`logs/full_redock_test_new.log`（nohup 方式）。
+- 2026-01-25: 修复 DiffDock 输出元数据的 confidence 解析：支持负号、按文件名排序并记录 confidence_map/best_confidence，避免之前只取正值且无法对应文件的问题。
+- 2026-01-25: redock 脚本增加实时进度输出（处理/成功/失败/保留数量），并在每 100 个样本保留前 5 个的完整中间输出（DiffDock tmp 目录迁移到样本的 diffdock_output/tmp_keep）。
+- 2026-01-25: redock 增加 GPU 轮询分配（--gpu-ids），进度日志中显示 GPU。
+- 2026-01-25: DiffDock best pose 选择逻辑改为优先取最高 confidence 的 pose，只有缺失 confidence 时才回退到 rank1。
+- 2026-01-25: redock 修复已有 PDB 同路径拷贝导致的 SameFileError。
