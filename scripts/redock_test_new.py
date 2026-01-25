@@ -251,7 +251,8 @@ def main() -> None:
                     best_conf = meta.get("best_confidence")
                     if best_conf is None:
                         confs = meta.get("confidence_values", [])
-                        best_conf = max(confs) if confs else None
+                        valid_confs = [c for c in confs if c is not None]
+                        best_conf = max(valid_confs) if valid_confs else None
                     if best_conf is not None:
                         data.docking_confidence = torch.tensor([best_conf], dtype=torch.float)
                 except Exception:

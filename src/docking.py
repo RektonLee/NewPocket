@@ -791,25 +791,45 @@ def run_preprocess(uniprot_id: str,
                 copy_src = complex_dir if os.path.isdir(complex_dir) else diffdock_output_dir
                 sdf_files = []
                 confidence_map = {}
+                pose_entries = []
                 for fname in os.listdir(copy_src):
-                    if fname.endswith(".sdf"):
-                        sdf_files.append(fname)
-                        m = re.search(r"confidence(-?\d+(?:\.\d+)?)", fname)
-                        if m:
+                    if not fname.endswith(".sdf"):
+                        continue
+                    rank = None
+                    confidence = None
+                    m = re.match(r"^rank(\d+)(?:_confidence(-?\d+(?:\.\d+)?))?\.sdf$", fname)
+                    if m:
+                        try:
+                            rank = int(m.group(1))
+                        except ValueError:
+                            rank = None
+                        if m.group(2) is not None:
                             try:
-                                confidence_map[fname] = float(m.group(1))
+                                confidence = float(m.group(2))
                             except ValueError:
-                                pass
-                        shutil.copyfile(os.path.join(copy_src, fname), os.path.join(persist_dir, fname))
-                sdf_files.sort()
-                confidences = [confidence_map[f] for f in sdf_files if f in confidence_map]
+                                confidence = None
+                    sdf_files.append(fname)
+                    pose_entries.append({
+                        "filename": fname,
+                        "rank": rank,
+                        "confidence": confidence,
+                    })
+                    if confidence is not None:
+                        confidence_map[fname] = confidence
+                    shutil.copyfile(os.path.join(copy_src, fname), os.path.join(persist_dir, fname))
+                pose_entries.sort(key=lambda x: (x["rank"] is None, x["rank"] if x["rank"] is not None else 10**9, x["filename"]))
+                sdf_files = [p["filename"] for p in pose_entries]
+                confidences = [p["confidence"] for p in pose_entries]
                 best_confidence = confidence_map.get(os.path.basename(docked_ligand_sdf))
+                if best_confidence is None and confidence_map:
+                    best_confidence = max(confidence_map.values())
                 meta = {
                     "best_pose": os.path.basename(docked_ligand_sdf),
                     "sdf_files": sdf_files,
                     "confidence_values": confidences,
                     "confidence_map": confidence_map,
                     "best_confidence": best_confidence,
+                    "pose_entries": pose_entries,
                 }
                 with open(os.path.join(persist_dir, "docking_meta.json"), "w") as f:
                     json.dump(meta, f, indent=2)
