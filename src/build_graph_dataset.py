@@ -17,9 +17,37 @@ from sklearn.preprocessing import OneHotEncoder
 from tqdm import tqdm
 import logging
 import math
+import json
+import glob
 
 # 导入graph_builder_rbf中的函数
 from graph_builder_rbf import build_graph, parse_pocket, gaussian_rbf
+
+
+class PoseSetData:
+    """
+    多pose数据集结构
+    存储一个样本的多个pose图
+    
+    Attributes:
+        graphs: list[Data] - K个图的列表
+        y: torch.Tensor - 标签值 [1]
+        pose_scores: torch.Tensor - pose置信度分数 [K]（可选）
+        sample_id: str - 样本ID
+        metadata: dict - 其他元数据
+    """
+    def __init__(self, graphs, y, sample_id=None, pose_scores=None, metadata=None):
+        self.graphs = graphs  # list[Data]
+        self.y = y  # [1]
+        self.sample_id = sample_id
+        self.pose_scores = pose_scores  # [K] 或 None
+        self.metadata = metadata or {}
+    
+    def __len__(self):
+        return len(self.graphs)
+    
+    def __repr__(self):
+        return f"PoseSetData(n_poses={len(self.graphs)}, sample_id={self.sample_id})"
 
 def compute_angle_features(edge_index, pos, max_neighbors=10):
     """
@@ -166,9 +194,17 @@ def compute_dihedral_features(edge_index, pos, max_dihedrals=5):
     
     return torch.stack(dihedral_features)  # [E, 4]
 
-def enhanced_build_graph(atoms, temperature):
+def enhanced_build_graph(atoms, temperature, verbose=False):
     """
     增强版图构建函数，添加角度和二面角特征
+    
+    Args:
+        atoms: 原子列表
+        temperature: 温度
+        verbose: 是否打印详细信息
+    
+    Returns:
+        Data对象，包含24维边特征
     """
     # 使用原始的build_graph函数
     data = build_graph(atoms, temperature)
@@ -178,11 +214,13 @@ def enhanced_build_graph(atoms, temperature):
     pos = data.pos
     
     # 计算角度特征
-    print("计算键角特征...")
+    if verbose:
+        print("计算键角特征...")
     angle_features = compute_angle_features(edge_index, pos)
     
     # 计算二面角特征  
-    print("计算二面角特征...")
+    if verbose:
+        print("计算二面角特征...")
     dihedral_features = compute_dihedral_features(edge_index, pos)
     
     # 将新特征添加到边特征中
@@ -196,19 +234,182 @@ def enhanced_build_graph(atoms, temperature):
     # 更新数据对象
     data.edge_attr = enhanced_edge_attr
     
-    print(f"边特征维度从 {original_edge_attr.shape[1]} 增加到 {enhanced_edge_attr.shape[1]}")
+    if verbose:
+        print(f"边特征维度从 {original_edge_attr.shape[1]} 增加到 {enhanced_edge_attr.shape[1]}")
     
     return data
 
+
+def find_pose_files(base_path, sample_id, pocket_hash):
+    """
+    查找所有pose文件（支持多pose）
+    
+    Args:
+        base_path: pocket基础目录
+        sample_id: 样本ID
+        pocket_hash: pocket哈希值
+    
+    Returns:
+        list: pose文件路径列表，按pose索引排序
+    """
+    base_name = f'{sample_id}_{pocket_hash}'
+    
+    # 首先尝试查找多pose文件（pose_0.pdb, pose_1.pdb等）
+    pose_files = []
+    pose_pattern = os.path.join(base_path, sample_id, f'{base_name}_pose*.pdb')
+    found_files = glob.glob(pose_pattern)
+    
+    if found_files:
+        # 提取pose索引并排序
+        import re
+        pose_files_with_idx = []
+        for f in found_files:
+            m = re.search(r'pose(\d+)\.pdb$', f)
+            if m:
+                idx = int(m.group(1))
+                pose_files_with_idx.append((idx, f))
+        pose_files_with_idx.sort(key=lambda x: x[0])
+        pose_files = [f for _, f in pose_files_with_idx]
+    else:
+        # 回退到单pose文件
+        single_pose = os.path.join(base_path, sample_id, f'{base_name}_10A.pdb')
+        if os.path.exists(single_pose):
+            pose_files = [single_pose]
+    
+    return pose_files
+
+
+def load_pose_metadata(sample_dir):
+    """
+    从docking_meta.json加载pose元数据（confidence等）
+    
+    Args:
+        sample_dir: 样本目录（包含diffdock_output）
+    
+    Returns:
+        dict: pose元数据，包含confidence_map等
+    """
+    meta_paths = [
+        os.path.join(sample_dir, 'diffdock_output', 'docking_meta.json'),
+        os.path.join(sample_dir, 'docking_meta.json'),
+    ]
+    
+    for meta_path in meta_paths:
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                logging.warning(f"Failed to load metadata from {meta_path}: {e}")
+    
+    return None
+
+def build_graphs_for_sample(sample_id, smiles, kcat_value, pocket_base_dir, 
+                            temperature=303.15, use_multipose=True, verbose=False):
+    """
+    为单个样本构建图（支持多pose）
+    
+    Args:
+        sample_id: 样本ID
+        smiles: SMILES字符串
+        kcat_value: kcat值
+        pocket_base_dir: pocket基础目录
+        temperature: 温度
+        use_multipose: 是否使用多pose（如果可用）
+        verbose: 是否打印详细信息
+    
+    Returns:
+        PoseSetData或Data对象（如果只有一个pose）
+    """
+    pocket_hash = int(hashlib.sha256(smiles.encode()).hexdigest(), 16) & 0xffff
+    
+    # 查找所有pose文件
+    pose_files = find_pose_files(pocket_base_dir, sample_id, pocket_hash)
+    
+    if not pose_files:
+        return None
+    
+    # 加载pose元数据（confidence等）
+    sample_dir = os.path.join(pocket_base_dir, sample_id)
+    metadata = load_pose_metadata(sample_dir)
+    
+    graphs = []
+    pose_scores = []
+    
+    for pose_idx, pose_file in enumerate(pose_files):
+        try:
+            atoms = parse_pocket(pose_file)
+            if len(atoms) < 3:
+                if verbose:
+                    print(f"Warning: {pose_file} has too few atoms ({len(atoms)})")
+                continue
+            
+            # 构建图
+            data = enhanced_build_graph(atoms, temperature, verbose=verbose)
+            data.pdb_id = os.path.basename(pose_file)
+            data.sample_id = sample_id
+            data.pose_id = pose_idx
+            
+            graphs.append(data)
+            
+            # 尝试从元数据获取confidence
+            if metadata and 'confidence_map' in metadata:
+                conf = metadata['confidence_map'].get(os.path.basename(pose_file))
+                if conf is not None:
+                    pose_scores.append(conf)
+                else:
+                    pose_scores.append(0.0)  # 默认分数
+            else:
+                pose_scores.append(0.0)
+                
+        except Exception as e:
+            if verbose:
+                print(f'Error processing pose {pose_idx} for {sample_id}: {e}')
+            continue
+    
+    if not graphs:
+        return None
+    
+    # 创建标签
+    y = torch.log10(torch.tensor([kcat_value], dtype=torch.float))
+    
+    # 如果只有一个pose且不使用多pose模式，返回单个Data对象（向后兼容）
+    if len(graphs) == 1 and not use_multipose:
+        data = graphs[0]
+        data.y = y
+        return data
+    
+    # 否则返回PoseSetData
+    pose_scores_tensor = torch.tensor(pose_scores, dtype=torch.float) if pose_scores else None
+    
+    return PoseSetData(
+        graphs=graphs,
+        y=y,
+        sample_id=sample_id,
+        pose_scores=pose_scores_tensor,
+        metadata=metadata or {}
+    )
+
+
 def main():
     print("开始执行main函数...")
-    # 读取你的训练数据
-    df = pd.read_csv('kcat_data_with_ids.csv')
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='构建图数据集（支持多pose）')
+    parser.add_argument('--input', type=str, default='kcat_data_with_ids.csv', help='输入CSV文件')
+    parser.add_argument('--output', type=str, default='kcat_train_full_1213.pt', help='输出.pt文件')
+    parser.add_argument('--pocket_dir', type=str, 
+                       default='/home/lizihao/Work/enzyme_prediction/PGNN/sample_data/samples',
+                       help='Pocket基础目录')
+    parser.add_argument('--use_multipose', action='store_true', 
+                       help='使用多pose模式（如果可用）')
+    parser.add_argument('--temperature', type=float, default=303.15, help='温度')
+    
+    args = parser.parse_args()
+    
+    # 读取训练数据
+    df = pd.read_csv(args.input)
     print(f'Loading {len(df)} samples from CSV')
-
-    # 设置pocket目录 - 适配新的文件结构
-    POCKET_BASE_DIR = '/home/lizihao/Work/enzyme_prediction/PGNN/sample_data/samples'
-    SAVE_PATH = 'kcat_train_full_1213.pt'  # 使用新文件名
 
     dataset = []
     successful_count = 0
@@ -217,38 +418,34 @@ def main():
 
     for idx, row in tqdm(df.iterrows(), total=len(df)):
         sample_id = row['sample_id']
-        smiles = row['substrate_smiles']  # 使用正确的列名
+        smiles = row['substrate_smiles']
         kcat_value = row['kcat_value']
-        # temperature = row['temperature'] 临时取消     
-        temperature=303.15
-        # 使用实际的ec值而不是硬编码 临时取消   
-        ec = 1
-        
-        # 计算pocket文件名 - 适配新的文件结构
-        pocket_hash = int(hashlib.sha256(smiles.encode()).hexdigest(), 16) & 0xffff
-        base_name = f'{sample_id}_{pocket_hash}'
-        pocket_pdb = os.path.join(POCKET_BASE_DIR, sample_id, f'{base_name}_10A.pdb')
-        
-        if not os.path.exists(pocket_pdb):
-            failed_count += 1
-            continue
+        ec = row.get('ec', 1)  # 如果有ec列则使用，否则默认为1
         
         try:
-            atoms = parse_pocket(pocket_pdb)
-            if len(atoms) < 3:
+            data = build_graphs_for_sample(
+                sample_id=sample_id,
+                smiles=smiles,
+                kcat_value=kcat_value,
+                pocket_base_dir=args.pocket_dir,
+                temperature=args.temperature,
+                use_multipose=args.use_multipose,
+                verbose=False
+            )
+            
+            if data is None:
                 failed_count += 1
                 continue
             
-            # 使用增强版图构建函数
-            print(f"构建增强图: {sample_id}")
-            data = enhanced_build_graph(atoms, temperature)
-            data.y = torch.log10(torch.tensor([kcat_value], dtype=torch.float))
-            data.pdb_id = f'{sample_id}_{pocket_hash}_10A.pdb'
-            data.sample_id = sample_id
-            data.ec = ec
+            # 添加ec信息
+            if isinstance(data, PoseSetData):
+                for g in data.graphs:
+                    g.ec = ec
+            else:
+                data.ec = ec
             
             dataset.append(data)
-            successful_indices.append(idx)  # 记录成功处理的索引
+            successful_indices.append(idx)
             successful_count += 1
             
         except Exception as e:
@@ -257,17 +454,24 @@ def main():
             continue
 
     # 保存pt文件
-    torch.save(dataset, SAVE_PATH)
-    print(f'✅ Saved {len(dataset)} samples to {SAVE_PATH}')
+    torch.save(dataset, args.output)
+    print(f'✅ Saved {len(dataset)} samples to {args.output}')
+    
+    # 统计多pose样本数量
+    multipose_count = sum(1 for d in dataset if isinstance(d, PoseSetData))
+    if multipose_count > 0:
+        print(f'   - {multipose_count} samples with multiple poses')
+        print(f'   - {len(dataset) - multipose_count} samples with single pose')
     
     # 保存成功处理的CSV文件
     successful_df = df.loc[successful_indices].copy()
-    successful_csv_path = 'successful_full_train.csv'
+    successful_csv_path = args.output.replace('.pt', '_successful.csv')
     successful_df.to_csv(successful_csv_path, index=False)
     print(f'✅ Saved {len(successful_df)} successful samples to {successful_csv_path}')
     
     print(f'Successful: {successful_count}, Failed: {failed_count}')
-    print(f'Success rate: {successful_count/(successful_count+failed_count)*100:.1f}%')
+    if successful_count + failed_count > 0:
+        print(f'Success rate: {successful_count/(successful_count+failed_count)*100:.1f}%')
 
 if __name__ == '__main__':
     main()

@@ -49,6 +49,7 @@ class DockingConfig:
     gpu_id: int = 0  # 默认 GPU ID（从环境变量 CUDA_VISIBLE_DEVICES 获取，或使用此默认值）
     inference_steps: int = 20  # DiffDock 推理步数
     samples_per_complex: int = 5  # 每个复合物生成的 pose 数量
+    top_k_poses: int = 1  # 保存top-K个pose（用于PoseSet集成），默认1（只保存最佳pose）
     pocket_cutoff: float = 5.0  # 口袋提取距离阈值（Å）
     validate_pose: bool = True  # 是否验证 pose
     failed_log_path: Optional[str] = None  # 失败日志路径，None 则自动生成
@@ -673,43 +674,88 @@ def _find_best_pose(output_dir: str) -> Optional[str]:
     1. confidence 最高的文件（如果存在 confidence 输出）
     2. rank1_*.sdf
     3. 任何 .sdf 文件
+    
+    Returns:
+        最佳pose的SDF文件路径，失败返回None
+    """
+    top_k = _find_top_k_poses(output_dir, k=1)
+    return top_k[0] if top_k else None
+
+
+def _find_top_k_poses(output_dir: str, k: int = 5) -> list:
+    """
+    从 DiffDock 输出目录中查找 top-K pose（按confidence排序）
+    
+    Args:
+        output_dir: DiffDock输出目录
+        k: 返回的pose数量
+    
+    Returns:
+        list: top-K pose的SDF文件路径列表（按confidence降序排列）
     """
     if not os.path.exists(output_dir):
-        return None
+        return []
     
     import re
-    sdf_files = []
-    rank1_path = None
-    best_conf = None
-    best_conf_path = None
+    pose_candidates = []  # [(confidence, rank, file_path, filename)]
+    
     for f in os.listdir(output_dir):
-        if f.endswith('.sdf'):
-            file_path = os.path.join(output_dir, f)
-            m = re.search(r"confidence(-?\d+(?:\.\d+)?)", f)
-            if m:
+        if not f.endswith('.sdf'):
+            continue
+            
+        file_path = os.path.join(output_dir, f)
+        confidence = None
+        rank = None
+        
+        # 尝试从文件名提取confidence和rank
+        # 格式1: rank1_confidence-1.23.sdf
+        # 格式2: confidence-1.23.sdf
+        # 格式3: rank1.sdf
+        m1 = re.match(r"^rank(\d+)(?:_confidence(-?\d+(?:\.\d+)?))?\.sdf$", f)
+        if m1:
+            try:
+                rank = int(m1.group(1))
+                if m1.group(2) is not None:
+                    confidence = float(m1.group(2))
+            except ValueError:
+                pass
+        
+        # 如果没匹配到，尝试其他格式
+        if confidence is None:
+            m2 = re.search(r"confidence(-?\d+(?:\.\d+)?)", f)
+            if m2:
                 try:
-                    conf = float(m.group(1))
-                    if best_conf is None or conf > best_conf:
-                        best_conf = conf
-                        best_conf_path = file_path
+                    confidence = float(m2.group(1))
                 except ValueError:
                     pass
+        
+        if rank is None:
             if 'rank1' in f.lower() or 'rank_1' in f.lower():
-                rank1_path = file_path
-            sdf_files.append((f, file_path))
+                rank = 1
+            elif 'rank' in f.lower():
+                m3 = re.search(r"rank(\d+)", f.lower())
+                if m3:
+                    try:
+                        rank = int(m3.group(1))
+                    except ValueError:
+                        pass
+        
+        # 如果都没有，使用文件名排序作为fallback
+        if rank is None:
+            rank = 9999  # 默认低优先级
+        
+        if confidence is None:
+            confidence = -9999.0  # 默认低confidence
+        
+        pose_candidates.append((confidence, rank, file_path, f))
     
-    if best_conf_path:
-        return best_conf_path
-    if rank1_path:
-        return rank1_path
-
-    # 按文件名排序（通常 confidence 较高的排前面）
-    sdf_files.sort(key=lambda x: x[0])
+    # 排序：优先按confidence降序，其次按rank升序
+    pose_candidates.sort(key=lambda x: (-x[0], x[1]))
     
-    if sdf_files:
-        return sdf_files[0][1]
+    # 返回top-K
+    top_k = [candidate[2] for candidate in pose_candidates[:k]]
     
-    return None
+    return top_k
 
 
 def run_preprocess(uniprot_id: str, 
@@ -720,7 +766,8 @@ def run_preprocess(uniprot_id: str,
                    gpu_id: Optional[int] = None,
                    validate_pose: bool = True,
                    persist_dir: Optional[str] = None,
-                   keep_tmp_dir: bool = False) -> bool:
+                   keep_tmp_dir: bool = False,
+                   top_k_poses: Optional[int] = None) -> bool:
     """
     使用 DiffDock 进行分子对接和口袋提取
     
@@ -728,10 +775,13 @@ def run_preprocess(uniprot_id: str,
         uniprot_id: UniProt ID
         smiles: 底物 SMILES 字符串
         prot_pdb_path: 蛋白质 PDB 文件路径
-        output_pocket_path: 输出口袋文件路径
+        output_pocket_path: 输出口袋文件路径（如果top_k_poses>1，会生成多个pocket文件）
         index: 样本索引
         gpu_id: GPU ID（默认使用配置）
         validate_pose: 是否验证 pose
+        persist_dir: 持久化目录（保存DiffDock输出）
+        keep_tmp_dir: 是否保留临时目录
+        top_k_poses: 保存top-K个pose（None则使用配置默认值）
     
     Returns:
         bool: 处理是否成功
@@ -767,28 +817,42 @@ def run_preprocess(uniprot_id: str,
         diffdock_output_dir = os.path.join(tmp_dir, "diffdock_output")
         os.makedirs(diffdock_output_dir, exist_ok=True)
         
+        # 确定要保存的pose数量
+        if top_k_poses is None:
+            top_k_poses = _config.top_k_poses
+        
+        # 运行DiffDock（需要生成足够的pose）
+        samples_needed = max(top_k_poses, _config.samples_per_complex)
         docked_ligand_sdf = run_diffdock(
             protein_pdb=clean_pdb_path,
             ligand_sdf=ligand_sdf,
             output_dir=diffdock_output_dir,
             gpu_id=gpu_id,
             validate=validate_pose,
-            original_smiles=smiles
+            original_smiles=smiles,
+            samples_per_complex=samples_needed
         )
         
         if docked_ligand_sdf is None:
             raise RuntimeError("DiffDock failed to generate pose")
+        
+        # 查找top-K pose
+        complex_dir = os.path.join(
+            diffdock_output_dir,
+            os.path.splitext(os.path.basename(clean_pdb_path))[0]
+        )
+        search_path = complex_dir if os.path.isdir(complex_dir) else diffdock_output_dir
+        top_poses = _find_top_k_poses(search_path, k=top_k_poses)
+        
+        if not top_poses:
+            raise RuntimeError("Failed to find any poses")
         
         # 如果需要保留中间结果，复制 DiffDock 输出
         if persist_dir:
             os.makedirs(persist_dir, exist_ok=True)
             try:
                 import re
-                complex_dir = os.path.join(
-                    diffdock_output_dir,
-                    os.path.splitext(os.path.basename(clean_pdb_path))[0]
-                )
-                copy_src = complex_dir if os.path.isdir(complex_dir) else diffdock_output_dir
+                copy_src = search_path
                 sdf_files = []
                 confidence_map = {}
                 pose_entries = []
@@ -820,11 +884,12 @@ def run_preprocess(uniprot_id: str,
                 pose_entries.sort(key=lambda x: (x["rank"] is None, x["rank"] if x["rank"] is not None else 10**9, x["filename"]))
                 sdf_files = [p["filename"] for p in pose_entries]
                 confidences = [p["confidence"] for p in pose_entries]
-                best_confidence = confidence_map.get(os.path.basename(docked_ligand_sdf))
+                best_confidence = confidence_map.get(os.path.basename(top_poses[0])) if top_poses else None
                 if best_confidence is None and confidence_map:
                     best_confidence = max(confidence_map.values())
                 meta = {
-                    "best_pose": os.path.basename(docked_ligand_sdf),
+                    "best_pose": os.path.basename(top_poses[0]) if top_poses else None,
+                    "top_k_poses": [os.path.basename(p) for p in top_poses],
                     "sdf_files": sdf_files,
                     "confidence_values": confidences,
                     "confidence_map": confidence_map,
@@ -836,23 +901,44 @@ def run_preprocess(uniprot_id: str,
             except Exception as e:
                 logger.warning(f"Failed to persist DiffDock outputs: {e}")
 
-        # SDF -> PDB
-        pose_pdb = os.path.join(tmp_dir, "pose.pdb")
-        if not sdf_to_pdb(docked_ligand_sdf, pose_pdb):
-            raise RuntimeError("Failed to convert SDF to PDB")
+        # 为每个top-K pose生成pocket文件
+        base_output_path = output_pocket_path
+        base_name_no_ext = os.path.splitext(base_output_path)[0]
         
-        # 提取口袋
-        os.makedirs(os.path.dirname(output_pocket_path), exist_ok=True)
-        extract_pocket_pymol(clean_pdb_path, pose_pdb, output_pocket_path, 
-                            cutoff=_config.pocket_cutoff)
+        success_count = 0
+        for pose_idx, pose_sdf in enumerate(top_poses):
+            # SDF -> PDB
+            pose_pdb = os.path.join(tmp_dir, f"pose_{pose_idx}.pdb")
+            if not sdf_to_pdb(pose_sdf, pose_pdb):
+                logger.warning(f"Failed to convert pose {pose_idx} SDF to PDB")
+                continue
+            
+            # 生成pocket文件路径
+            if top_k_poses > 1:
+                # 多个pose：生成pose_0.pdb, pose_1.pdb等
+                pocket_path = f"{base_name_no_ext}_pose{pose_idx}.pdb"
+            else:
+                # 单个pose：使用原始路径
+                pocket_path = base_output_path
+            
+            # 提取口袋
+            os.makedirs(os.path.dirname(pocket_path), exist_ok=True)
+            try:
+                extract_pocket_pymol(clean_pdb_path, pose_pdb, pocket_path, 
+                                    cutoff=_config.pocket_cutoff)
+                if os.path.exists(pocket_path):
+                    file_size = os.path.getsize(pocket_path)
+                    logger.info(f"✅ Pose {pose_idx} pocket saved: {pocket_path} ({file_size} bytes)")
+                    success_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to extract pocket for pose {pose_idx}: {e}")
         
-        # 验证输出
-        if os.path.exists(output_pocket_path):
-            file_size = os.path.getsize(output_pocket_path)
-            logger.info(f"✅ {base_name} completed -> {output_pocket_path} ({file_size} bytes)")
+        # 验证输出（至少第一个pose成功）
+        if success_count > 0:
+            logger.info(f"✅ {base_name} completed: {success_count}/{len(top_poses)} poses processed")
             return True
         else:
-            raise FileNotFoundError(f"Pocket file not saved: {output_pocket_path}")
+            raise FileNotFoundError(f"Failed to generate any pocket files")
             
     except Exception as e:
         logger.error(f"❌ Failed {uniprot_id}: {e}")
