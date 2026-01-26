@@ -3,11 +3,16 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.egg-info/
+dist/
+build/
 
 # Data (CRITICAL: Do not commit large files)
 data/
 results/
 outputs/
+output/
+sample_data/
 *.pt
 *.pth
 *.pdb
@@ -16,6 +21,28 @@ outputs/
 *.mol2
 *.csv
 *.xlsx
+
+# Logs and temporary files
+logs/
+tmp/
+*.log
+*.out
+*.err
+
+# Experiments and outputs
+experiments/
+runs_registry.csv
+
+# External tools (should be managed separately)
+DiffDock/
+benchmark_tools/
+
+# Generated images and plots
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.svg
 
 # Environment
 .env
@@ -28,8 +55,14 @@ wandb/
 .vscode/
 .idea/
 *.swp
+*.swo
+*~
 
 # Notebooks
 .ipynb_checkpoints
+notebooks/*.ipynb
 
+# OS
+.DS_Store
+Thumbs.db
 
