@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv, global_mean_pool, MessagePassing, GatedGraphConv, GATConv, GlobalAttention, Set2Set
+from torch_geometric.data import Batch
 import torch_geometric.utils as utils
 
 class PocketGNN(nn.Module):
@@ -772,3 +773,166 @@ class PHPTransformer(nn.Module):
             raise ValueError("模型输出包含 NaN 值")
 
         return out
+
+
+class PoseSetGNN(nn.Module):
+    """
+    PoseSetGNN: 支持多pose集成的GNN模型
+    
+    核心思想：
+    1. 对每个pose构建图并编码
+    2. 使用聚合器将多个pose的预测聚合成最终结果
+    3. 支持不确定性量化（pose-induced uncertainty）
+    
+    基于PocketGNNKcatOnly，但增加了pose聚合功能
+    """
+    def __init__(self, 
+                 node_input_dim, 
+                 edge_input_dim, 
+                 hidden_dim=256, 
+                 num_layers=6, 
+                 heads=8, 
+                 dropout=0.1, 
+                 concat_heads=True,
+                 pooling_type='mean',
+                 use_seq_embedding=False,
+                 seq_embedding_dim=1280,
+                 aggregator_type='score_weighted',
+                 use_uncertainty=False,
+                 **aggregator_kwargs):
+        """
+        Args:
+            aggregator_type: 聚合器类型 ('score_weighted', 'attention', 'mixture')
+            use_uncertainty: 是否输出不确定性（方差）
+            **aggregator_kwargs: 聚合器特定参数
+        """
+        super().__init__()
+        
+        # 使用PocketGNNKcatOnly作为基础编码器
+        self.base_model = PocketGNNKcatOnly(
+            node_input_dim=node_input_dim,
+            edge_input_dim=edge_input_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            heads=heads,
+            dropout=dropout,
+            concat_heads=concat_heads,
+            pooling_type=pooling_type,
+            use_seq_embedding=use_seq_embedding,
+            seq_embedding_dim=seq_embedding_dim,
+            output_quantiles=False
+        )
+        
+        # 导入聚合器
+        from pose_aggregator import create_aggregator
+        
+        # 确定聚合器的输入维度
+        if pooling_type == 'set2set':
+            readout_dim = hidden_dim * 2
+        else:
+            readout_dim = hidden_dim
+        
+        if use_seq_embedding:
+            readout_dim = readout_dim + hidden_dim  # 图特征 + 序列特征
+        
+        # 创建聚合器
+        if aggregator_type == 'attention':
+            aggregator_kwargs['input_dim'] = readout_dim
+        
+        self.aggregator = create_aggregator(
+            aggregator_type=aggregator_type,
+            **aggregator_kwargs
+        )
+        
+        self.aggregator_type = aggregator_type
+        self.use_uncertainty = use_uncertainty
+    
+    def forward(self, pose_set_data, return_weights=False):
+        """
+        前向传播
+        
+        Args:
+            pose_set_data: PoseSetData对象，包含多个pose的图
+            return_weights: 是否返回聚合权重
+        
+        Returns:
+            predictions: [B, 1] - 聚合后的预测
+            uncertainty: [B, 1] - 不确定性（如果use_uncertainty=True）
+            weights: [B, K] - 聚合权重（如果return_weights=True）
+        """
+        from build_graph_dataset import PoseSetData
+        
+        if not isinstance(pose_set_data, PoseSetData):
+            # 如果不是PoseSetData，回退到单pose模式
+            return self.base_model(pose_set_data)
+        
+        graphs = pose_set_data.graphs
+        pose_scores = pose_set_data.pose_scores
+        K = len(graphs)
+        
+        if K == 0:
+            raise ValueError("PoseSetData contains no graphs")
+        
+        # 将所有图batch到一起
+        batch = Batch.from_data_list(graphs)
+        
+        # 获取每个pose的预测
+        predictions = self.base_model(batch)  # [B*K, 1]
+        
+        # Reshape: [B*K, 1] -> [B, K, 1]
+        # 假设所有样本都有相同数量的pose
+        B = predictions.shape[0] // K
+        predictions = predictions.view(B, K, 1)
+        
+        # 聚合
+        if self.aggregator_type == 'mixture':
+            if self.use_uncertainty:
+                mean, var, weights = self.aggregator(
+                    predictions, 
+                    uncertainties=None,  # 可以扩展支持输入不确定性
+                    pose_scores=pose_scores
+                )
+                if return_weights:
+                    return mean, var, weights
+                return mean, var
+            else:
+                mean, weights = self.aggregator(
+                    predictions,
+                    pose_scores=pose_scores
+                )
+                if return_weights:
+                    return mean, weights
+                return mean
+        else:
+            # score_weighted 或 attention
+            aggregated, weights = self.aggregator(predictions, pose_scores)
+            if return_weights:
+                return aggregated, weights
+            return aggregated
+    
+    def get_graph_embeddings(self, pose_set_data):
+        """
+        获取所有pose的图embedding（用于分析）
+        
+        Returns:
+            embeddings: [B, K, D] - 每个pose的图embedding
+        """
+        from build_graph_dataset import PoseSetData
+        
+        if not isinstance(pose_set_data, PoseSetData):
+            return self.base_model.get_graph_embedding(pose_set_data)
+        
+        graphs = pose_set_data.graphs
+        K = len(graphs)
+        
+        # 将所有图batch到一起
+        batch = Batch.from_data_list(graphs)
+        
+        # 获取embedding
+        embeddings = self.base_model.get_graph_embedding(batch)  # [B*K, D]
+        
+        # Reshape
+        B = embeddings.shape[0] // K
+        embeddings = embeddings.view(B, K, -1)
+        
+        return embeddings
