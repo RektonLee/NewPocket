@@ -42,6 +42,7 @@ benchmark_tools/
 *.jpg
 *.jpeg
 *.pdf
+!paperwriting/gemini.pdf
 *.svg
 
 # Environment
@@ -65,4 +66,3 @@ notebooks/*.ipynb
 # OS
 .DS_Store
 Thumbs.db
-
