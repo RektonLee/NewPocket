@@ -438,7 +438,7 @@ class PocketGNNKcatOnly(nn.Module):
     - 支持Set2Set池化（更高级的池化方法）
     """
     def __init__(self, node_input_dim, edge_input_dim, hidden_dim=256, num_layers=6, heads=8, dropout=0.1, concat_heads=True, 
-                 pooling_type='mean', use_seq_embedding=False, seq_embedding_dim=1280, output_quantiles=False):
+                 pooling_type='mean', use_seq_embedding=False, seq_embedding_dim=1280, output_quantiles=False, use_mlp_layernorm=True):
         super().__init__()
         self.node_encoder = nn.Linear(node_input_dim, hidden_dim)
         
@@ -496,9 +496,11 @@ class PocketGNNKcatOnly(nn.Module):
             mlp_input_dim = readout_dim
 
         # MLP for kcat-only regression
-        # ⚡ 使用 LayerNorm 替代 BatchNorm，更稳定（不依赖 batch 统计量）
-        self.mlp = nn.Sequential(
-            nn.LayerNorm(mlp_input_dim),  # 更稳定的归一化方式
+        # use_mlp_layernorm: 是否在MLP开头使用LayerNorm（向后兼容旧模型）
+        mlp_layers = []
+        if use_mlp_layernorm:
+            mlp_layers.append(nn.LayerNorm(mlp_input_dim))  # 更稳定的归一化方式
+        mlp_layers.extend([
             nn.Linear(mlp_input_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
@@ -506,7 +508,8 @@ class PocketGNNKcatOnly(nn.Module):
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 3 if output_quantiles else 1)  # 输出3个分位数或1个点预测
-        )
+        ])
+        self.mlp = nn.Sequential(*mlp_layers)
 
     def forward(self, data, return_attention_weights=False):
         x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch

@@ -75,7 +75,7 @@ def clean_data_objects(data_list):
 
 def test(test_dataset_path, model_path, save_dir="outputs/test_results", batch_size=32, 
          hidden_dim=128, num_layers=3, heads=4, dropout=0.1, pooling_type='mean',
-         use_seq_embedding=False, seq_embedding_path=None):
+         use_seq_embedding=False, seq_embedding_path=None, use_mlp_layernorm=None):
     """
     在测试集上评估模型
     
@@ -237,6 +237,26 @@ def test(test_dataset_path, model_path, save_dir="outputs/test_results", batch_s
     edge_input_dim = sample_data.edge_attr.shape[1]  # 应该是 24 维
     print(f"   Node input dim: {node_input_dim}, Edge input dim: {edge_input_dim}")
     
+    # 自动检测是否使用LayerNorm（通过检查模型权重）
+    if use_mlp_layernorm is None:
+        print("   🔍 自动检测模型结构...")
+        state_dict = torch.load(model_path, map_location='cpu', weights_only=False)
+        # 检查mlp.0是否是LayerNorm（LayerNorm的weight是1D，Linear的weight是2D）
+        if 'mlp.0.weight' in state_dict:
+            mlp_0_weight = state_dict['mlp.0.weight']
+            if mlp_0_weight.dim() == 1:
+                # 1D权重 -> LayerNorm
+                use_mlp_layernorm = True
+                print("   ✅ 检测到模型使用LayerNorm")
+            else:
+                # 2D权重 -> Linear（旧模型）
+                use_mlp_layernorm = False
+                print("   ✅ 检测到模型不使用LayerNorm（旧版本）")
+        else:
+            # 默认使用LayerNorm（新版本）
+            use_mlp_layernorm = True
+            print("   ⚠️  无法检测，默认使用LayerNorm")
+    
     model = MD.PocketGNNKcatOnly(
         node_input_dim=node_input_dim,
         edge_input_dim=edge_input_dim,
@@ -246,7 +266,8 @@ def test(test_dataset_path, model_path, save_dir="outputs/test_results", batch_s
         dropout=dropout,
         pooling_type=pooling_type,
         use_seq_embedding=use_seq_embedding,
-        seq_embedding_dim=seq_embedding_dim if use_seq_embedding else 0
+        seq_embedding_dim=seq_embedding_dim if use_seq_embedding else 0,
+        use_mlp_layernorm=use_mlp_layernorm
     ).to(device)
     
     # === 加载模型权重 ===
@@ -254,48 +275,18 @@ def test(test_dataset_path, model_path, save_dir="outputs/test_results", batch_s
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"❌ 找不到模型权重文件: {model_path}")
     
-    # 尝试加载模型权重，如果严格匹配失败则使用strict=False
+    # 加载模型权重
     state_dict = torch.load(model_path, map_location=device, weights_only=False)
     try:
         model.load_state_dict(state_dict, strict=True)
         print("✅ 模型权重加载完成（严格匹配）")
     except RuntimeError as e:
         print("⚠️  严格匹配失败，尝试使用strict=False加载...")
-        # 如果是因为LayerNorm导致的索引不匹配，需要调整state_dict
-        # 检查是否是mlp结构不匹配
-        model_keys = set(model.state_dict().keys())
-        state_keys = set(state_dict.keys())
-        
-        # 如果模型有LayerNorm但权重没有，需要调整
-        if 'mlp.0.weight' in model_keys and 'mlp.0.weight' in state_keys:
-            model_weight = model.state_dict()['mlp.0.weight']
-            state_weight = state_dict['mlp.0.weight']
-            if model_weight.shape != state_weight.shape:
-                print("   检测到MLP结构不匹配，尝试调整...")
-                # 移除LayerNorm相关的权重，调整索引
-                adjusted_state_dict = {}
-                for key, value in state_dict.items():
-                    if key.startswith('mlp.'):
-                        # 调整索引：mlp.0 -> mlp.1, mlp.3 -> mlp.4, mlp.6 -> mlp.7
-                        parts = key.split('.')
-                        if len(parts) >= 2 and parts[0] == 'mlp':
-                            idx = int(parts[1])
-                            if idx == 0:
-                                new_key = 'mlp.1.' + '.'.join(parts[2:])
-                            elif idx == 3:
-                                new_key = 'mlp.4.' + '.'.join(parts[2:])
-                            elif idx == 6:
-                                new_key = 'mlp.7.' + '.'.join(parts[2:])
-                            else:
-                                new_key = key
-                            adjusted_state_dict[new_key] = value
-                        else:
-                            adjusted_state_dict[key] = value
-                    else:
-                        adjusted_state_dict[key] = value
-                state_dict = adjusted_state_dict
-        
-        model.load_state_dict(state_dict, strict=False)
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        if missing_keys:
+            print(f"   ⚠️  缺失的keys: {missing_keys[:5]}..." if len(missing_keys) > 5 else f"   ⚠️  缺失的keys: {missing_keys}")
+        if unexpected_keys:
+            print(f"   ⚠️  多余的keys: {unexpected_keys[:5]}..." if len(unexpected_keys) > 5 else f"   ⚠️  多余的keys: {unexpected_keys}")
         print("✅ 模型权重加载完成（非严格匹配）")
     model.eval()
     
@@ -513,6 +504,8 @@ if __name__ == '__main__':
                        help='启用序列嵌入（需要与训练时一致）')
     parser.add_argument('--seq_embedding_path', type=str, default=None,
                        help='序列嵌入文件路径（如果启用序列嵌入）')
+    parser.add_argument('--use_mlp_layernorm', type=lambda x: (str(x).lower() == 'true'), default=None,
+                       help='是否使用MLP LayerNorm（None=自动检测，True/False=手动指定）')
     
     args = parser.parse_args()
     
@@ -533,6 +526,7 @@ if __name__ == '__main__':
         dropout=args.dropout,
         pooling_type=args.pooling_type,
         use_seq_embedding=args.use_seq_embedding,
-        seq_embedding_path=args.seq_embedding_path
+        seq_embedding_path=args.seq_embedding_path,
+        use_mlp_layernorm=args.use_mlp_layernorm
     )
 
