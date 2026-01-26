@@ -34,9 +34,10 @@ def resolve_kcat_columns(df: pd.DataFrame) -> Tuple[str, Optional[str]]:
     raise ValueError("No kcat/log10_kcat column found in CSV.")
 
 
-def compute_pocket_name(sample_id: str, smiles: str) -> str:
+def compute_pocket_name(sample_id: str, smiles: str, cutoff: float) -> str:
     pocket_hash = int(hashlib.sha256(smiles.encode()).hexdigest(), 16) & 0xffff
-    return f"{sample_id}_{pocket_hash}_10A.pdb"
+    cutoff_label = int(round(cutoff))
+    return f"{sample_id}_{pocket_hash}_{cutoff_label}A.pdb"
 
 
 def _find_existing_pdb(sample_id: str, pdb_dirs: Optional[str]) -> Optional[str]:
@@ -126,6 +127,8 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=303.15)
     parser.add_argument("--pocket-cutoff", type=float, default=5.0)
     parser.add_argument("--samples-per-complex", type=int, default=5)
+    parser.add_argument("--top-k-poses", type=int, default=1,
+                        help="Save top-K poses (pocket_pose*.pdb) in addition to best pose")
     parser.add_argument("--gpu-ids", type=str, default=None, help="Comma-separated GPU ids for DiffDock")
     parser.add_argument("--gpu", type=int, default=None)
     parser.add_argument("--protein-pdb-dirs", type=str, default=None,
@@ -138,6 +141,10 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--skip-register", action="store_true")
+    parser.add_argument("--shard-index", type=int, default=None,
+                        help="Shard index for parallel runs (0-based)")
+    parser.add_argument("--shard-count", type=int, default=None,
+                        help="Total number of shards for parallel runs")
     args = parser.parse_args()
 
     if args.diffdock_python:
@@ -162,6 +169,8 @@ def main() -> None:
     structure_processor = ProteinStructureProcessor(sample_manager=sample_manager)
     from docking import get_config
     get_config().samples_per_complex = args.samples_per_complex
+    get_config().top_k_poses = args.top_k_poses
+    get_config().pocket_cutoff = args.pocket_cutoff
     log10_col, linear_col = resolve_kcat_columns(df)
 
     dataset = []
@@ -177,6 +186,14 @@ def main() -> None:
         df = df[df["sample_id"].apply(lambda sid: _find_existing_pdb(str(sid), args.protein_pdb_dirs) is not None)]
         df = df.reset_index(drop=True)
 
+    if args.shard_index is not None and args.shard_count is not None:
+        if args.shard_count <= 0:
+            raise ValueError("--shard-count must be > 0")
+        if args.shard_index < 0 or args.shard_index >= args.shard_count:
+            raise ValueError("--shard-index must be in [0, shard-count)")
+        df = df.iloc[[i for i in range(len(df)) if i % args.shard_count == args.shard_index]]
+        df = df.reset_index(drop=True)
+
     for idx, row in enumerate(df.iterrows(), start=1):
         row = row[1]
         sample_id = str(row["sample_id"])
@@ -189,7 +206,7 @@ def main() -> None:
 
         docking_dir = sample_manager.get_docking_dir(sample_id)
         persist_dir = docking_dir / "diffdock_output"
-        pocket_name = compute_pocket_name(sample_id, smiles)
+        pocket_name = compute_pocket_name(sample_id, smiles, args.pocket_cutoff)
         pocket_pdb = docking_dir / pocket_name
 
         if pocket_pdb.exists() and not args.overwrite:

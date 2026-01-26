@@ -285,12 +285,19 @@ def find_pose_files(base_path, sample_id, pocket_hash):
             pose_files = [f for _, f in pose_files_with_idx]
             break  # 找到就退出
     
-    # 如果没找到多pose文件，回退到单pose文件
+    # 如果没找到多pose文件，回退到单pose文件（支持不同cutoff标记）
     if not pose_files:
         for search_path in search_paths:
-            single_pose = os.path.join(search_path, f'{base_name}_10A.pdb')
-            if os.path.exists(single_pose):
-                pose_files = [single_pose]
+            pattern = os.path.join(search_path, f'{base_name}_*A.pdb')
+            found = glob.glob(pattern)
+            if found:
+                # 如果多个，优先选择数值最大的cutoff
+                def _cutoff_val(p):
+                    import re
+                    m = re.search(r'_(\\d+)A\\.pdb$', p)
+                    return int(m.group(1)) if m else -1
+                found.sort(key=_cutoff_val, reverse=True)
+                pose_files = [found[0]]
                 break
     
     return pose_files

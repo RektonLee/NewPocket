@@ -270,3 +270,4 @@ Python3 src/train.py --dataset data/processed/kcat_full_1213.pt \
 - 2026-01-25: DiffDock best pose 选择逻辑改为优先取最高 confidence 的 pose，只有缺失 confidence 时才回退到 rank1。
 - 2026-01-25: redock 修复已有 PDB 同路径拷贝导致的 SameFileError。
 - 2026-01-25: docking_meta.json 对齐 DiffDock 输出结构：解析 rank/confidence（含负号），按 rank 排序写入 pose_entries，并在 confidence_values 中保留 None；best_confidence 取最高置信。
+- 2026-01-26: 口袋提取/构图改进：_cutoff 文件名按实际 cutoff 生成；新增 --top-k-poses，生成多pose pocket；docking_meta.json 记录 pocket_cutoff；parse_pocket 改进配体识别并加入 DSSP 二级结构与ASA（追加到节点特征）。

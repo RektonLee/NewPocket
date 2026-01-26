@@ -890,6 +890,7 @@ def run_preprocess(uniprot_id: str,
                 meta = {
                     "best_pose": os.path.basename(top_poses[0]) if top_poses else None,
                     "top_k_poses": [os.path.basename(p) for p in top_poses],
+                    "pocket_cutoff": _config.pocket_cutoff,
                     "sdf_files": sdf_files,
                     "confidence_values": confidences,
                     "confidence_map": confidence_map,

@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from torch_geometric.data import Data
 from Bio.PDB import PDBParser
+from Bio.PDB.DSSP import DSSP
 from sklearn.preprocessing import OneHotEncoder
 import pandas as pd
 from tqdm import tqdm
@@ -108,20 +109,58 @@ def get_elec_feature(max_atomic_number=20):
 atomic_electronic_features = get_elec_feature()
 
 # ==== 解析 PDB 口袋 ====
+def _compute_ss_sasa(pdb_path):
+    """
+    使用DSSP计算残基二级结构与ASA。
+    返回 {(chain_id, res_id): (ss_char, asa)}，失败则返回空dict。
+    """
+    try:
+        parser = PDBParser(QUIET=True)
+        structure = parser.get_structure('pocket', pdb_path)
+        model = next(structure.get_models())
+        dssp = DSSP(model, pdb_path)
+        ss_map = {}
+        for key in dssp.keys():
+            chain_id, res_id = key
+            ss_char = dssp[key][2]
+            asa = dssp[key][3]
+            ss_map[(chain_id, res_id)] = (ss_char, asa)
+        return ss_map
+    except Exception:
+        return {}
+
+
+def _ss_onehot(ss_char):
+    # Helix: H/G/I, Strand: E/B, Coil/Other: C
+    if ss_char in ("H", "G", "I"):
+        return [1.0, 0.0, 0.0]
+    if ss_char in ("E", "B"):
+        return [0.0, 1.0, 0.0]
+    return [0.0, 0.0, 1.0]
+
+
 def parse_pocket(pdb_path):
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure('pocket', pdb_path)
+    ss_map = _compute_ss_sasa(pdb_path)
     atoms = []
     for atom in structure.get_atoms():
         if atom.element != 'H':
             res = atom.get_parent().get_resname()
-            chain = atom.get_parent().get_full_id()[2]
-            is_ligand = 1 if (res=='UNL' or chain==' ') else 0
+            residue = atom.get_parent()
+            chain = residue.get_parent().id
+            hetero_flag = residue.id[0]
+            is_ligand = 1 if (hetero_flag != ' ' and res not in ('HOH', 'WAT')) else 0
+            if chain == 'L':
+                is_ligand = 1
+            ss_char, asa = ss_map.get((chain, residue.id), (None, 0.0))
             atoms.append({
                 'coord': atom.coord,
                 'element': atom.element,
                 'residue': res if res in residue_list else 'LIG',
-                'is_ligand': is_ligand
+                'is_ligand': is_ligand,
+                'ss_onehot': _ss_onehot(ss_char),
+                'sasa': float(asa) if asa is not None else 0.0
             })
     return atoms
 
@@ -156,7 +195,9 @@ def build_graph(atoms, temperature):
         for e in elements
     ])
 
-    x = np.hstack([el_feat, res_feat, is_lig, min_dists, elec, props])
+    ss_feat = np.array([a.get('ss_onehot', [0.0, 0.0, 1.0]) for a in atoms], dtype=float)
+    sasa = np.array([[a.get('sasa', 0.0) / 100.0] for a in atoms], dtype=float)  # 简单缩放
+    x = np.hstack([el_feat, res_feat, is_lig, min_dists, elec, props, ss_feat, sasa])
     if np.isnan(x).any():
         raise ValueError("节点特征包含 NaN")
 
