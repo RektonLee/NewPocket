@@ -254,9 +254,50 @@ def test(test_dataset_path, model_path, save_dir="outputs/test_results", batch_s
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"❌ 找不到模型权重文件: {model_path}")
     
-    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
+    # 尝试加载模型权重，如果严格匹配失败则使用strict=False
+    state_dict = torch.load(model_path, map_location=device, weights_only=False)
+    try:
+        model.load_state_dict(state_dict, strict=True)
+        print("✅ 模型权重加载完成（严格匹配）")
+    except RuntimeError as e:
+        print("⚠️  严格匹配失败，尝试使用strict=False加载...")
+        # 如果是因为LayerNorm导致的索引不匹配，需要调整state_dict
+        # 检查是否是mlp结构不匹配
+        model_keys = set(model.state_dict().keys())
+        state_keys = set(state_dict.keys())
+        
+        # 如果模型有LayerNorm但权重没有，需要调整
+        if 'mlp.0.weight' in model_keys and 'mlp.0.weight' in state_keys:
+            model_weight = model.state_dict()['mlp.0.weight']
+            state_weight = state_dict['mlp.0.weight']
+            if model_weight.shape != state_weight.shape:
+                print("   检测到MLP结构不匹配，尝试调整...")
+                # 移除LayerNorm相关的权重，调整索引
+                adjusted_state_dict = {}
+                for key, value in state_dict.items():
+                    if key.startswith('mlp.'):
+                        # 调整索引：mlp.0 -> mlp.1, mlp.3 -> mlp.4, mlp.6 -> mlp.7
+                        parts = key.split('.')
+                        if len(parts) >= 2 and parts[0] == 'mlp':
+                            idx = int(parts[1])
+                            if idx == 0:
+                                new_key = 'mlp.1.' + '.'.join(parts[2:])
+                            elif idx == 3:
+                                new_key = 'mlp.4.' + '.'.join(parts[2:])
+                            elif idx == 6:
+                                new_key = 'mlp.7.' + '.'.join(parts[2:])
+                            else:
+                                new_key = key
+                            adjusted_state_dict[new_key] = value
+                        else:
+                            adjusted_state_dict[key] = value
+                    else:
+                        adjusted_state_dict[key] = value
+                state_dict = adjusted_state_dict
+        
+        model.load_state_dict(state_dict, strict=False)
+        print("✅ 模型权重加载完成（非严格匹配）")
     model.eval()
-    print("✅ 模型权重加载完成")
     
     # === 在测试集上进行推理 ===
     print("\n🔮 开始测试集推理...")

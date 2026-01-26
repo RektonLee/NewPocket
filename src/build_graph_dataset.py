@@ -253,28 +253,45 @@ def find_pose_files(base_path, sample_id, pocket_hash):
         list: pose文件路径列表，按pose索引排序
     """
     base_name = f'{sample_id}_{pocket_hash}'
+    sample_dir = os.path.join(base_path, sample_id)
     
     # 首先尝试查找多pose文件（pose_0.pdb, pose_1.pdb等）
     pose_files = []
-    pose_pattern = os.path.join(base_path, sample_id, f'{base_name}_pose*.pdb')
-    found_files = glob.glob(pose_pattern)
     
-    if found_files:
-        # 提取pose索引并排序
-        import re
-        pose_files_with_idx = []
-        for f in found_files:
-            m = re.search(r'pose(\d+)\.pdb$', f)
-            if m:
-                idx = int(m.group(1))
-                pose_files_with_idx.append((idx, f))
-        pose_files_with_idx.sort(key=lambda x: x[0])
-        pose_files = [f for _, f in pose_files_with_idx]
-    else:
-        # 回退到单pose文件
-        single_pose = os.path.join(base_path, sample_id, f'{base_name}_10A.pdb')
-        if os.path.exists(single_pose):
-            pose_files = [single_pose]
+    # 尝试多个可能的路径
+    search_paths = [
+        sample_dir,  # 直接在sample目录下
+        os.path.join(sample_dir, 'docking'),  # 在docking子目录下
+    ]
+    
+    for search_path in search_paths:
+        if not os.path.exists(search_path):
+            continue
+            
+        # 查找多pose文件
+        pose_pattern = os.path.join(search_path, f'{base_name}_pose*.pdb')
+        found_files = glob.glob(pose_pattern)
+        
+        if found_files:
+            # 提取pose索引并排序
+            import re
+            pose_files_with_idx = []
+            for f in found_files:
+                m = re.search(r'pose(\d+)\.pdb$', f)
+                if m:
+                    idx = int(m.group(1))
+                    pose_files_with_idx.append((idx, f))
+            pose_files_with_idx.sort(key=lambda x: x[0])
+            pose_files = [f for _, f in pose_files_with_idx]
+            break  # 找到就退出
+    
+    # 如果没找到多pose文件，回退到单pose文件
+    if not pose_files:
+        for search_path in search_paths:
+            single_pose = os.path.join(search_path, f'{base_name}_10A.pdb')
+            if os.path.exists(single_pose):
+                pose_files = [single_pose]
+                break
     
     return pose_files
 
