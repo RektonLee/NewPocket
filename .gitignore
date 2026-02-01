@@ -6,7 +6,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-
+Diffdock/
 # Data (CRITICAL: Do not commit large files)
 data/
 results/
@@ -28,6 +28,8 @@ tmp/
 *.log
 *.out
 *.err
+*.aux
+*.synctex.gz
 
 # Experiments and outputs
 experiments/
