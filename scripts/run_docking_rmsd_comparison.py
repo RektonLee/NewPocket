@@ -39,46 +39,97 @@ logger = logging.getLogger(__name__)
 #  RMSD 计算（不需要 DiffDock env）
 # ─────────────────────────────────────────────
 
+def parse_coords_from_pdbqt(pdbqt_file: str) -> tuple:
+    """从 Vina 输出 PDBQT 中解析第一个 MODEL 的重原子坐标和元素。"""
+    coords, elements = [], []
+    in_model = False
+    with open(pdbqt_file) as f:
+        for line in f:
+            if line.startswith('MODEL'):
+                in_model = True
+                continue
+            if line.startswith('ENDMDL'):
+                break
+            if line.startswith(('ATOM', 'HETATM')):
+                elem = line[76:78].strip() if len(line) > 76 else line[12:16].strip().rstrip('0123456789')
+                if not elem:
+                    elem = line[12:14].strip()
+                if elem in ('H', 'HD', 'HS'):
+                    continue  # 跳过氢
+                try:
+                    x = float(line[30:38])
+                    y = float(line[38:46])
+                    z = float(line[46:54])
+                    elem_clean = ''.join(c for c in elem if c.isalpha())[:2].capitalize()
+                    coords.append([x, y, z])
+                    elements.append(elem_clean)
+                except ValueError:
+                    continue
+    return np.array(coords) if coords else np.empty((0, 3)), elements
+
+
+def compute_rmsd_coords(pred_coords: np.ndarray, ref_coords: np.ndarray,
+                         pred_elems: list = None, ref_elems: list = None) -> float:
+    """用匈牙利算法对原子排序，计算最佳 RMSD（支持对称分子）。"""
+    from scipy.optimize import linear_sum_assignment
+    n_pred = len(pred_coords)
+    n_ref  = len(ref_coords)
+    if n_pred == 0 or n_ref == 0:
+        return np.nan
+
+    # 如果原子数不匹配，取两者中少的那个
+    n = min(n_pred, n_ref)
+    if n_pred != n_ref:
+        logger.debug(f"Atom count mismatch: pred={n_pred}, ref={n_ref}, using {n}")
+
+    # 距离矩阵
+    diff = pred_coords[:n, None, :] - ref_coords[None, :n, :]  # [n, n, 3]
+    dist_mat = np.sqrt((diff ** 2).sum(axis=-1))              # [n, n]
+    row_ind, col_ind = linear_sum_assignment(dist_mat)
+    rmsd = np.sqrt(((pred_coords[row_ind] - ref_coords[col_ind]) ** 2).sum(axis=-1).mean())
+    return float(rmsd)
+
+
 def compute_rmsd_sdf_vs_pdb(pred_file: str, ref_sdf: str) -> float:
-    """计算预测配体 pose 与晶体 pose 的对称 RMSD（重原子）。"""
+    """计算预测配体 pose 与晶体 pose 的 RMSD（重原子，坐标匹配法）。"""
     try:
         from rdkit import Chem
-        from rdkit.Chem import AllChem, rdMolAlign
+        from rdkit.Chem import AllChem
 
+        # 解析预测坐标
         if pred_file.endswith('.pdbqt'):
-            mol_pred = pdbqt_to_rdkit(pred_file)
+            pred_coords, pred_elems = parse_coords_from_pdbqt(pred_file)
         elif pred_file.endswith('.sdf'):
-            mol_pred = Chem.SDMolSupplier(pred_file, sanitize=True)[0]
+            mol = Chem.SDMolSupplier(pred_file, sanitize=True)[0]
+            if mol is None:
+                return np.nan
+            mol = Chem.RemoveHs(mol)
+            conf = mol.GetConformer()
+            pred_coords = np.array([conf.GetAtomPosition(i) for i in range(mol.GetNumAtoms())])
+            pred_elems = [mol.GetAtomWithIdx(i).GetSymbol() for i in range(mol.GetNumAtoms())]
         else:
-            mol_pred = Chem.MolFromPDBFile(pred_file, sanitize=True, removeHs=True)
-
-        mol_ref = Chem.SDMolSupplier(ref_sdf, sanitize=True)[0]
-
-        if mol_pred is None or mol_ref is None:
             return np.nan
 
-        # 移除氢
-        mol_pred = Chem.RemoveHs(mol_pred)
-        mol_ref  = Chem.RemoveHs(mol_ref)
+        # 解析参考坐标（晶体 SDF）
+        mol_ref = Chem.SDMolSupplier(ref_sdf, sanitize=True)[0]
+        if mol_ref is None:
+            return np.nan
+        mol_ref = Chem.RemoveHs(mol_ref)
+        conf_ref = mol_ref.GetConformer()
+        ref_coords = np.array([conf_ref.GetAtomPosition(i) for i in range(mol_ref.GetNumAtoms())])
 
-        # 确保原子数一致（简单检查）
-        if mol_pred.GetNumAtoms() != mol_ref.GetNumAtoms():
-            # 尝试用 GetBestRMS（允许对称性）
-            try:
-                rmsd = AllChem.GetBestRMS(mol_pred, mol_ref)
-                return rmsd
-            except Exception:
-                return np.nan
+        if len(pred_coords) == 0:
+            return np.nan
 
-        rmsd = AllChem.GetBestRMS(mol_pred, mol_ref)
-        return rmsd
+        return compute_rmsd_coords(pred_coords, ref_coords)
+
     except Exception as e:
         logger.debug(f"RMSD calc error: {e}")
         return np.nan
 
 
 def pdbqt_to_rdkit(pdbqt_file: str):
-    """将 pdbqt 转为 RDKit mol（只取第一个 MODEL）。"""
+    """将 pdbqt 转为 RDKit mol（保留向后兼容）。"""
     try:
         from rdkit import Chem
         lines = []
@@ -86,12 +137,18 @@ def pdbqt_to_rdkit(pdbqt_file: str):
             for line in f:
                 if line.startswith('ENDMDL'):
                     break
-                if line.startswith('HETATM') or line.startswith('ATOM'):
-                    lines.append(line[:66] + '\n')  # 截断 pdbqt 特有字段
+                if line.startswith(('HETATM', 'ATOM')):
+                    elem = line[76:78].strip() if len(line) > 76 else ''
+                    if elem in ('H', 'HD', 'HS'):
+                        continue
+                    lines.append(line[:66] + '\n')
         pdb_block = ''.join(lines) + 'END\n'
         mol = Chem.MolFromPDBBlock(pdb_block, sanitize=False, removeHs=True)
         if mol is not None:
-            Chem.SanitizeMol(mol, Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES)
+            try:
+                Chem.SanitizeMol(mol, Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES)
+            except Exception:
+                pass
         return mol
     except Exception as e:
         logger.debug(f"pdbqt_to_rdkit error: {e}")
@@ -115,15 +172,30 @@ def get_ligand_center(sdf_file: str):
     return pos.mean(axis=0)
 
 
-def sdf_to_pdbqt_ligand(sdf_file: str, out_pdbqt: str, adfr_bin: str) -> bool:
-    """用 ADFR prepare_ligand 将 SDF 转 PDBQT。"""
-    prepare_ligand = os.path.join(adfr_bin, 'prepare_ligand')
-    cmd = [prepare_ligand, '-l', sdf_file, '-o', out_pdbqt, '-A', 'hydrogens']
+def sdf_to_pdbqt_ligand(sdf_file: str, out_pdbqt: str, adfr_bin: str = None) -> bool:
+    """将 SDF 转换为 PDBQT（使用 meeko + RDKit）。"""
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=30)
-        return os.path.exists(out_pdbqt)
+        import warnings
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+        from meeko import MoleculePreparation
+        mol = Chem.SDMolSupplier(sdf_file, sanitize=True)[0]
+        if mol is None:
+            return False
+        mol_h = AllChem.AddHs(mol, addCoords=True)
+        if mol_h.GetNumConformers() == 0:
+            AllChem.EmbedMolecule(mol_h, AllChem.ETKDGv3())
+            AllChem.MMFFOptimizeMolecule(mol_h)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            preparator = MoleculePreparation()
+            preparator.prepare(mol_h)
+            pdbqt_str = preparator.write_pdbqt_string()
+        with open(out_pdbqt, 'w') as f:
+            f.write(pdbqt_str)
+        return len(pdbqt_str) > 100
     except Exception as e:
-        logger.debug(f"prepare_ligand error: {e}")
+        logger.debug(f"sdf_to_pdbqt error: {e}")
         return False
 
 
@@ -169,15 +241,25 @@ def run_vina(receptor_pdbqt: str, ligand_pdbqt: str, center: np.ndarray,
 
 
 def dock_vina_one_sample(sample_dir: Path, out_dir: Path, vina_bin: str, adfr_bin: str) -> dict:
-    """对单个样本运行 Vina，返回 RMSD 结果。"""
+    """对单个样本运行 Vina，返回 RMSD 结果。
+    使用 _ligand_start_conf.sdf 作为输入（随机起始构象），_ligand.sdf 作为 RMSD 参考（晶体位置）。
+    """
     name = sample_dir.name
     protein_pdb = sample_dir / f'{name}_protein.pdb'
-    ligand_sdf  = sample_dir / f'{name}_ligand.sdf'
+    ref_sdf     = sample_dir / f'{name}_ligand.sdf'    # 晶体 SDF（用于 RMSD 计算）
+    start_sdf   = sample_dir / f'{name}_ligand_start_conf.sdf'  # 起始构象（用于 Vina 输入）
 
-    if not protein_pdb.exists() or not ligand_sdf.exists():
-        # 尝试 _ligands.sdf
-        ligand_sdf = sample_dir / f'{name}_ligands.sdf'
-        if not ligand_sdf.exists():
+    # 如果没有 start_conf，用晶体 SDF（但 RMSD 可能偏低）
+    if not start_sdf.exists():
+        start_sdf = ref_sdf
+
+    if not protein_pdb.exists() or not ref_sdf.exists():
+        ref_sdf_alt = sample_dir / f'{name}_ligands.sdf'
+        if ref_sdf_alt.exists():
+            ref_sdf = ref_sdf_alt
+            if not start_sdf.exists():
+                start_sdf = ref_sdf
+        else:
             return {'sample': name, 'vina_rmsd': np.nan, 'error': 'missing_files'}
 
     sample_out = out_dir / name
@@ -187,8 +269,8 @@ def dock_vina_one_sample(sample_dir: Path, out_dir: Path, vina_bin: str, adfr_bi
     ligand_pdbqt   = sample_out / 'ligand.pdbqt'
     vina_out_pdbqt = sample_out / 'vina_out.pdbqt'
 
-    # 获取 box 中心
-    center = get_ligand_center(str(ligand_sdf))
+    # 获取 box 中心（从晶体位置，代表真实口袋中心）
+    center = get_ligand_center(str(ref_sdf))
     if center is None:
         return {'sample': name, 'vina_rmsd': np.nan, 'error': 'center_failed'}
 
@@ -198,9 +280,9 @@ def dock_vina_one_sample(sample_dir: Path, out_dir: Path, vina_bin: str, adfr_bi
         if not ok:
             return {'sample': name, 'vina_rmsd': np.nan, 'error': 'receptor_prep_failed'}
 
-    # 准备配体
+    # 准备配体（用 start_conf 作为 Vina 输入）
     if not ligand_pdbqt.exists():
-        ok = sdf_to_pdbqt_ligand(str(ligand_sdf), str(ligand_pdbqt), adfr_bin)
+        ok = sdf_to_pdbqt_ligand(str(start_sdf), str(ligand_pdbqt), adfr_bin)
         if not ok:
             return {'sample': name, 'vina_rmsd': np.nan, 'error': 'ligand_prep_failed'}
 
@@ -210,8 +292,8 @@ def dock_vina_one_sample(sample_dir: Path, out_dir: Path, vina_bin: str, adfr_bi
     if not ok:
         return {'sample': name, 'vina_rmsd': np.nan, 'error': 'vina_failed'}
 
-    # 计算 RMSD（top-1 pose）
-    rmsd = compute_rmsd_sdf_vs_pdb(str(vina_out_pdbqt), str(ligand_sdf))
+    # 计算 RMSD（top-1 pose vs 晶体）
+    rmsd = compute_rmsd_sdf_vs_pdb(str(vina_out_pdbqt), str(ref_sdf))
     return {'sample': name, 'vina_rmsd': rmsd, 'error': None}
 
 
@@ -461,15 +543,26 @@ def main():
 
     # ─── Vina ───
     if not args.skip_vina:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
         vina_out = out_dir / 'vina_poses'
         vina_out.mkdir(exist_ok=True)
-        logger.info(f"Running AutoDock Vina on {len(samples)} samples...")
-        for sample_dir in tqdm(samples, desc='Vina'):
-            name = sample_dir.name
-            if name in done_samples:
-                continue
-            row = dock_vina_one_sample(sample_dir, vina_out, args.vina_bin, args.adfr_bin)
-            new_rows.append(row)
+        todo_samples = [s for s in samples if s.name not in done_samples]
+        logger.info(f"Running AutoDock Vina on {len(todo_samples)} samples (workers={args.n_workers})...")
+        with ProcessPoolExecutor(max_workers=args.n_workers) as pool:
+            futures = {
+                pool.submit(dock_vina_one_sample, s, vina_out, args.vina_bin, args.adfr_bin): s
+                for s in todo_samples
+            }
+            for fut in tqdm(as_completed(futures), total=len(futures), desc='Vina'):
+                try:
+                    row = fut.result()
+                except Exception as e:
+                    row = {'sample': futures[fut].name, 'vina_rmsd': np.nan, 'error': str(e)}
+                new_rows.append(row)
+                # 写中间结果（防止意外中断）
+                if len(new_rows) % 10 == 0:
+                    df_mid = pd.concat([df_existing, pd.DataFrame(new_rows)], ignore_index=True) if not df_existing.empty else pd.DataFrame(new_rows)
+                    df_mid.to_csv(results_path, index=False)
 
     # ─── DiffDock ───
     if not args.skip_diffdock and args.diffdock_python:

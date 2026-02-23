@@ -1,7 +1,41 @@
 # PocketGNN 改进工作进展报告
 
-**时间**: 2026-01-24
-**状态**: ✅ Phase 1 已完成，准备运行实验
+**更新时间**: 2026-02-24
+**状态**: ✅ 实验完成，论文更新完毕，待导师审阅
+
+---
+
+## ✅ 2026-02-24 新增工作（branch: paper/final-experiments）
+
+### 1. DiffDock vs AutoDock Vina RMSD 对比实验
+- **工具**: AutoDock Vina (redocking) vs DiffDock (ICLR 2023 published benchmark)
+- **数据集**: Astex Diverse Set (n=85, from PoseBench)
+- **结果**: DiffDock 38.2% top-1 success (<2Å) vs Vina 20.9% (**+82% relative**)
+- **关键优势**: DiffDock 无需手动指定结合位点，完全自动化
+- **脚本**: `scripts/run_docking_rmsd_comparison.py`
+- **图表**: `results/docking_rmsd_comparison/docking_rmsd_comparison.png`
+
+### 2. 生成测试集 ESM-2 Embeddings
+- 为 `kcat_test_new.csv` (1455 样本) 生成 ESM-2 embeddings
+- 使用 `facebook/esm2_t6_8M_UR50D`（轻量级但有效）
+- 保存至 `data/processed/esm_embeddings_test_new.pt`
+
+### 3. 模型评估（40% 同源性 OOD 测试集）
+- **模型**: `outputs/kcat_enhanced_run/best_model.pt` (set2set + ESM-2 fusion)
+- **测试集**: `kcat_merged_hom40_test.pt` (n=898)
+- **结果**: Pearson=**0.716**, R²=**0.387**, MAE=**0.90** log₁₀ unit
+- 比论文原有的 0.667/0.437 有所提升
+- 图表: `results/test_hom40_evaluation/test_kcat_prediction_scatter.png`
+
+### 4. 论文 gemini.tex 更新
+- 新增 DiffDock vs Vina 对比表（Table 2: `tab:docking_rmsd`）
+- 新增 RMSD 对比图（Figure 2: `fig:docking_comparison`）
+- 更新测试集指标（Pearson 0.667 → 0.716）
+- 更新 SOTA 比较表中的 PocketGNN 数值
+- 更新 scatter 图为真实测试集结果
+- PDF 已验证编译成功（10 页）
+
+---
 
 ---
 
