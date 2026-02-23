@@ -939,3 +939,187 @@ class PoseSetGNN(nn.Module):
         embeddings = embeddings.view(B, K, -1)
         
         return embeddings
+
+
+class EGNNLayer(nn.Module):
+    """
+    轻量E(n)-equivariant层：同时更新节点特征与坐标
+    """
+    def __init__(self, node_dim, edge_dim, hidden_dim, dropout=0.1, residual=True, normalize=True, tanh=True):
+        super().__init__()
+        self.node_dim = node_dim
+        self.edge_dim = edge_dim
+        self.hidden_dim = hidden_dim
+        self.residual = residual
+        self.normalize = normalize
+        self.tanh = tanh
+
+        edge_in_dim = node_dim * 2 + edge_dim + 1
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(edge_in_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU()
+        )
+        self.coord_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+        self.node_mlp = nn.Sequential(
+            nn.Linear(node_dim + hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, node_dim)
+        )
+        self.node_norm = nn.LayerNorm(node_dim)
+
+    def forward(self, x, pos, edge_index, edge_attr=None):
+        row, col = edge_index
+        rel = pos[row] - pos[col]  # [E, 3]
+        dist2 = (rel ** 2).sum(dim=-1, keepdim=True)  # [E, 1]
+
+        if edge_attr is None or self.edge_dim == 0:
+            edge_input = torch.cat([x[row], x[col], dist2], dim=-1)
+        else:
+            edge_input = torch.cat([x[row], x[col], edge_attr, dist2], dim=-1)
+
+        m_ij = self.edge_mlp(edge_input)  # [E, hidden_dim]
+
+        coord_coef = self.coord_mlp(m_ij)  # [E, 1]
+        if self.tanh:
+            coord_coef = torch.tanh(coord_coef)
+        if self.normalize:
+            dist = torch.sqrt(dist2 + 1e-8)
+            coord_update = rel / (dist + 1e-8) * coord_coef
+        else:
+            coord_update = rel * coord_coef
+        pos = pos + utils.scatter(coord_update, row, dim=0, dim_size=x.size(0), reduce='add')
+
+        m_agg = utils.scatter(m_ij, row, dim=0, dim_size=x.size(0), reduce='add')
+        h_in = torch.cat([x, m_agg], dim=-1)
+        h_out = self.node_mlp(h_in)
+        if self.residual:
+            x = x + h_out
+        else:
+            x = h_out
+        x = self.node_norm(x)
+        return x, pos
+
+
+class PocketEGNNEncoder(nn.Module):
+    """
+    口袋EGNN编码器：输出图级嵌入，可选返回节点嵌入
+    """
+    def __init__(self, node_input_dim, edge_input_dim, hidden_dim=256, num_layers=4, dropout=0.1,
+                 pooling_type='mean', use_edge_attr=True, normalize=True, tanh=True):
+        super().__init__()
+        self.node_encoder = nn.Sequential(
+            nn.Linear(node_input_dim, hidden_dim),
+            nn.SiLU()
+        )
+        self.use_edge_attr = use_edge_attr and edge_input_dim > 0
+        self.edge_dim = hidden_dim if self.use_edge_attr else 0
+        self.edge_encoder = nn.Linear(edge_input_dim, hidden_dim) if self.use_edge_attr else None
+
+        self.layers = nn.ModuleList([
+            EGNNLayer(
+                node_dim=hidden_dim,
+                edge_dim=self.edge_dim,
+                hidden_dim=hidden_dim,
+                dropout=dropout,
+                normalize=normalize,
+                tanh=tanh
+            )
+            for _ in range(num_layers)
+        ])
+
+        if pooling_type == 'mean':
+            self.readout = global_mean_pool
+            self.readout_dim = hidden_dim
+        elif pooling_type == 'global_attention':
+            self.gate_nn = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, 1)
+            )
+            self.readout = GlobalAttention(gate_nn=self.gate_nn)
+            self.readout_dim = hidden_dim
+        elif pooling_type == 'set2set':
+            self.readout = Set2Set(hidden_dim, processing_steps=3)
+            self.readout_dim = hidden_dim * 2
+        else:
+            raise ValueError(f"Unknown pooling type: {pooling_type}")
+
+    def forward(self, data, return_node_embeddings=False, return_graph_embedding=True):
+        x, pos, edge_index = data.x, data.pos, data.edge_index
+        edge_attr = data.edge_attr if self.use_edge_attr else None
+        x = self.node_encoder(x)
+        if self.edge_encoder is not None and edge_attr is not None:
+            edge_attr = self.edge_encoder(edge_attr)
+
+        for layer in self.layers:
+            x, pos = layer(x, pos, edge_index, edge_attr=edge_attr)
+
+        graph_x = self.readout(x, data.batch) if return_graph_embedding else None
+        if return_node_embeddings:
+            return x, graph_x
+        return graph_x
+
+    def get_graph_embedding(self, data):
+        return self.forward(data, return_node_embeddings=False, return_graph_embedding=True)
+
+
+class PocketEGNNKcatOnly(nn.Module):
+    """
+    基于PocketEGNNEncoder的kcat回归模型
+    """
+    def __init__(self, node_input_dim, edge_input_dim, hidden_dim=256, num_layers=4, dropout=0.1,
+                 pooling_type='mean', use_seq_embedding=False, seq_embedding_dim=1280, output_quantiles=False):
+        super().__init__()
+        self.encoder = PocketEGNNEncoder(
+            node_input_dim=node_input_dim,
+            edge_input_dim=edge_input_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout,
+            pooling_type=pooling_type
+        )
+        self.use_seq_embedding = use_seq_embedding
+        self.output_quantiles = output_quantiles
+
+        if use_seq_embedding:
+            self.seq_proj = nn.Sequential(
+                nn.Linear(seq_embedding_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            )
+            mlp_input_dim = self.encoder.readout_dim + hidden_dim
+        else:
+            mlp_input_dim = self.encoder.readout_dim
+
+        self.mlp = nn.Sequential(
+            nn.LayerNorm(mlp_input_dim),
+            nn.Linear(mlp_input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 3 if output_quantiles else 1)
+        )
+
+    def forward(self, data):
+        graph_x = self.encoder(data, return_node_embeddings=False, return_graph_embedding=True)
+        if self.use_seq_embedding:
+            if hasattr(data, 'seq_embedding'):
+                seq_x = self.seq_proj(data.seq_embedding)
+            else:
+                seq_x = torch.zeros(graph_x.size(0), self.seq_proj[0].out_features, device=graph_x.device)
+            graph_x = torch.cat([graph_x, seq_x], dim=-1)
+        return self.mlp(graph_x)
+
+    def get_graph_embedding(self, data):
+        return self.encoder.get_graph_embedding(data)

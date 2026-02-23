@@ -121,3 +121,7 @@ echo "  1. Run: python scripts/download_catpred_db.py"
 echo "  2. Run: python scripts/convert_catpred_to_pocketgnn.py"
 echo ""
 
+
+
+
+

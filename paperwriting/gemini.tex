@@ -8,7 +8,7 @@
 \usepackage{multirow}
 \usepackage{hyperref}
 \usepackage{url}
-\usepackage[numbers,sort&compress]{natbib}
+\usepackage[numbers,sort,compress]{natbib}
 \usepackage{bm}
 \usepackage{mathtools}
 \usepackage{xcolor}
@@ -31,7 +31,7 @@
 \author{
   Zihao Li$^{1}$ \quad Diannan Lu$^{1}$\\[3pt]
   $^{1}$Department of Chemical Engineering, Tsinghua University, Beijing, China\\
-  \texttt{rektonlee@foxmail.com, ludiannan@tsinghua.edu.cn}
+  \texttt{l-zh21@mails.tsinghua.edu.cn, ludiannan@tsinghua.edu.cn}
 }
 
 \date{}
@@ -43,9 +43,9 @@
 \begin{abstract}
 The enzyme turnover number ($k_{\text{cat}}$) is a pivotal kinetic parameter for understanding biocatalytic efficiency, yet its accurate prediction remains a grand challenge due to the complex interplay between local physicochemical constraints and global evolutionary context. Existing methods typically bifurcate into sequence-based approaches, which capture evolutionary semantics but miss fine-grained spatial details, or structure-based models, which often suffer from noise in whole-protein representations or lack global context.
 
-To bridge this gap, we propose \textbf{PocketGNN}, a \emph{cross-modal} deep learning framework that synergizes the precision of local 3D geometry with the breadth of global 1D sequence semantics. PocketGNN introduces a high-fidelity graph representation of the active pocket, enriched with a novel 24-dimensional geometric edge encoding (RBF distances, bond angles, dihedral angles) to capture the stereochemical determinants of catalysis. Crucially, this local structural view is fused with global evolutionary information extracted from pre-trained protein language models (ESM-2), creating a unified representation that spans spatial scales.
+To bridge this gap, we propose \textbf{PocketGNN}, a \emph{cross-modal} deep learning framework that synergizes the precision of local 3D geometry with the breadth of global 1D sequence semantics. PocketGNN introduces a high-fidelity graph representation of the active pocket, enriched with a 24-dimensional geometric edge encoding (RBF distances, bond angles, dihedral angles) to capture the stereochemical determinants of catalysis. Crucially, this local structural view is fused with global evolutionary information extracted from pre-trained protein language models (ESM-2), creating a unified representation that spans spatial scales.
 
-Evaluated on a rigorous dataset derived from IntEnzyDB, PocketGNN achieves a Pearson correlation coefficient ($r$) of \textbf{0.98} and a coefficient of determination ($R^2$) of \textbf{0.918} for $\log_{10}(k_{\text{cat}})$ under standard random splitting. Furthermore, under a strict 40\% sequence identity split designed to test zero-shot generalization to unseen families, the model maintains a robust correlation ($r=0.63$), significantly outperforming single-modality baselines. Interpretability analysis confirms that the model successfully attends to key catalytic residues, validating its ability to learn chemically meaningful structure-function relationships rather than mere sequence memorization.
+Evaluated on a dataset derived from IntEnzyDB, PocketGNN achieves strong correlation under standard random splitting ($r=0.98$, $R^2=0.918$), but this setting can inflate performance due to homology overlap. Under a strict 40\% sequence identity split designed to test zero-shot generalization to unseen families, the model maintains robust correlation ($r=0.67$, $R^2=0.44$), outperforming recent state-of-the-art methods including CatPred ($r=0.52$) and CataPro ($r=0.50$). Interpretability analysis confirms that the model successfully attends to key catalytic residues, validating its ability to learn chemically meaningful structure--function relationships beyond sequence memorization.
 \end{abstract}
 
 \section{Introduction}
@@ -53,10 +53,11 @@ Evaluated on a rigorous dataset derived from IntEnzyDB, PocketGNN achieves a Pea
 
 Enzymes are the orchestrators of life, driving metabolic flux with exquisite specificity. The catalytic turnover number ($k_{\text{cat}}$) serves as the quantitative benchmark of this efficiency~\citep{srinivasan2023guide}. In the era of synthetic biology, the ability to predict $k_{\text{cat}}$ in silico is a holy grail for rational enzyme design and metabolic pathway engineering~\citep{yan2022intenzydb, yu2023unikp}. However, $k_{\text{cat}}$ is an emergent property governed by factors across multiple scales: from the sub-angstrom precision of transition state stabilization in the active site to the global protein dynamics and stability encoded in the entire sequence.
 
+
 \paragraph{Related Work.}
 Predicting enzyme kinetic parameters from sequence and structural information is challenging due to sparse measurements, heterogeneous assay conditions, and substantial experimental noise. Early deep-learning efforts such as \textbf{DLKcat}~\citep{dlkcat} combined protein sequence features with small-molecule representations to predict $k_{\text{cat}}$ at scale, demonstrating that learned representations can capture enzyme–substrate-dependent trends. More recent works increasingly emphasize robust evaluation and broader kinetic coverage: \textbf{UniKP}~\citep{yu2023unikp} proposed a unified framework leveraging pretrained protein language models (pLMs) to predict multiple kinetic parameters. In parallel, \textbf{CatPred}~\citep{catpred} and \textbf{CataPro}~\citep{catapro} introduced comprehensive frameworks incorporating uncertainty estimates and broader parameterization, illustrating the field-wide trend toward multimodal feature integration.
 
-A major driver of progress has been the emergence of large-scale protein language models like **ProtTrans**~\citep{prottrans} and **ESM-2/ESMFold**~\citep{esmfold}. These models demonstrate evolutionary-scale modeling and strong representational power, motivating the use of frozen pLM embeddings as global context features. Beyond sequence-only models, structure-aware architectures like **Uni-Mol**~\citep{unimol} and **PiFold**~\citep{pifold} have leveraged graph-based encoders for molecular representation and inverse folding. Recent advances such as **EZSpecificity**~\citep{ezspecificity} employ cross-attention–empowered SE(3)-equivariant GNNs, demonstrating that explicitly modeling interactions between modalities can improve performance.
+A major driver of progress has been the emergence of large-scale protein language models like \textbf{ProtTrans}~\citep{prottrans} and \textbf{ESM-2/ESMFold}~\citep{esmfold}. These models demonstrate evolutionary-scale modeling and strong representational power, motivating the use of frozen pLM embeddings as global context features. Beyond sequence-only models, structure-aware architectures like \textbf{Uni-Mol}~\citep{unimol} and \textbf{PiFold}~\citep{pifold} have leveraged graph-based encoders for molecular representation and inverse folding. Recent advances such as \textbf{EZSpecificity}~\citep{ezspecificity} employ cross-attention--empowered SE(3)-equivariant GNNs, demonstrating that explicitly modeling interactions between modalities can improve performance.
 
 \paragraph{Our Solution: PocketGNN.}
 These developments suggest a converging direction: combining local 3D pocket geometry with global sequence-level evolutionary context. Therefore, we propose \textbf{PocketGNN}, a cross-modal framework designed to unify these complementary views. We posit that accurate kinetic prediction requires a "dual-lens" approach:
@@ -73,18 +74,18 @@ This fusion of \emph{local 3D physics} and \emph{global 1D evolution} allows Poc
 \subsection{Data Curation and Pipeline}
 \label{sec:data_pipeline}
 
-We curate our dataset from IntEnzyDB~\citep{yan2022intenzydb}, filtering for entries with valid UniProt IDs, substrate SMILES, and experimental $k_{\text{cat}}$ values. To ensure data quality, we exclude extreme outliers and select entries where $k_{\text{cat}} \in [10^{-2}, 10^{6}] \text{ s}^{-1}$.
+We curate our dataset from IntEnzyDB~\citep{yan2022intenzydb}, filtering for entries with valid UniProt IDs, substrate SMILES, and experimental $k_{\text{cat}}$ values. To ensure data quality, we exclude extreme outliers and select entries where $k_{\text{cat}} \in [10^{-2}, 10^{6}] \text{ s}^{-1}$. Our final dataset comprises approximately 9,000 enzyme-substrate pairs with experimentally measured $k_{\text{cat}}$ values, covering 6 major EC classes (EC 1-6).
 
 The data processing pipeline (Figure \ref{fig:framework}) proceeds as follows:
 \begin{enumerate}
     \item \textbf{Structure Acquisition}: Enzyme structures are sourced from the PDB or predicted using ESMFold~\citep{esmfold}. Substrate 3D conformers are generated from SMILES using RDKit with UFF energy minimization.
-    \item \textbf{Pocket Extraction}: We perform molecular docking using AutoDock Vina~\citep{trott2010autodock} guided by AutoSite to identify the most probable binding pose. The active pocket is defined as all protein atoms within 5.0 \AA{} of the docked substrate.
+    \item \textbf{Pocket Extraction}: We perform molecular docking using DiffDock~\citep{diffdock2023}, a diffusion-based docking method that automatically predicts binding poses without requiring manual specification of binding sites. The active pocket is defined as all protein atoms within 5.0 \AA{} of the docked substrate.
     \item \textbf{Graph Construction}: The pocket is converted into a radius graph ($r_{\text{cut}} = 4.0 \text{ \AA}$) for input into the GNN.
 \end{enumerate}
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=\textwidth]{architecture.png}
+    \includegraphics[width=\textwidth]{Architecture_EN.jpg}
     \caption{The cross-modal framework of PocketGNN. The model integrates a high-fidelity local graph encoder (capturing distances, angles, and torsions) with a global sequence encoder (ESM-2), bridging the gap between fine-grained geometry and evolutionary semantics.}
     \label{fig:framework}
 \end{figure}
@@ -113,15 +114,15 @@ To incorporate long-range dependencies, we utilize ESM-2 embeddings. For each en
 \subsubsection{Cross-Modal Late Fusion}
 The local structural representation $\mathbf{h}_{\text{pocket}}$ (from graph pooling) and the global sequence representation $\mathbf{s}_{\text{proj}}$ (from ESM-2 projection) are concatenated:
 \begin{equation}
-    \mathbf{z}_{\text{final}} = \text{MLP}([\mathbf{h}_{\text{pocket}} \parallel \mathbf{s}_{\text{proj}} \parallel \mathbf{t}_{\text{temp}}])
+    \mathbf{z}_{\text{final}} = \text{MLP}([\mathbf{h}_{\text{pocket}} \parallel \mathbf{s}_{\text{proj}}])
 \end{equation}
-where $\mathbf{t}_{\text{temp}}$ represents the experimental temperature embedding. This late fusion allows the model to dynamically weigh the immediate physical constraints of the pocket against the global stability implied by the sequence.
+To avoid dimensional imbalance between the high-dimensional sequence embedding (640-1280 dim) and the graph representation (128-256 dim), we employ a projection layer that maps the ESM-2 embedding to the same dimension as the graph features before concatenation. This late fusion allows the model to dynamically weigh the immediate physical constraints of the pocket against the global stability implied by the sequence.
 
 \section{Experiments}
 \label{sec:experiments}
 
 \subsection{Experimental Setup}
-The dataset is randomly split into 80\% training and 20\% validation sets for in-distribution evaluation. Additionally, to rigorously test generalization, we construct a homology-aware split using MMseqs2, ensuring that no sequence in the test set shares $>40\%$ identity with the training set. We evaluate performance using Coefficient of Determination ($R^2$), Pearson Correlation Coefficient ($r$), and Mean Squared Error (MSE).
+We report two evaluation settings. (i) \textbf{Random split}: 80\% training and 20\% validation for in-distribution assessment. (ii) \textbf{Homology-aware split}: we cluster sequences with MMseqs2 at 40\% identity and construct train/val/test splits at the cluster level, ensuring no test sequence exceeds 40\% identity to any training sequence. This split serves as the primary indicator of out-of-distribution generalization. We evaluate performance using Coefficient of Determination ($R^2$), Pearson Correlation Coefficient ($r$), and Mean Squared Error (MSE).
 
 \subsection{Data Quality and Feature Analysis}
 \label{sec:data_analysis}
@@ -133,7 +134,7 @@ To ensure that our graph representations capture meaningful physicochemical sign
 PocketGNN demonstrates superior performance, effectively leveraging its cross-modal design.
 
 \paragraph{In-Distribution Performance (Random Split).}
-As shown in Table \ref{tab:results}, the full model achieves a Pearson $r$ of 0.98 and $R^2$ of 0.918 for $\log_{10}(k_{cat})$. The significant improvement over the "Structure-only" (PGNN-Basic) and "Sequence-only" baselines highlights the synergy of combining local geometry with global semantics. While an $R^2 > 0.9$ is exceptionally high for kinetic data and may reflect the high similarity within enzyme families in a random split, the consistent ranking capability ($r=0.98$) remains a strong indicator of model utility for in-family screening.
+As shown in Table \ref{tab:results}, the full model achieves a Pearson $r$ of 0.98 and $R^2$ of 0.918 for $\log_{10}(k_{cat})$. The improvement over the structure-only and sequence-only baselines highlights the synergy of combining local geometry with global semantics. We note that this setting can overestimate performance due to family-level overlap, so we treat the homology-aware split as the more faithful measure of generalization.
 
 \begin{table}[h]
 \centering
@@ -152,7 +153,25 @@ PGNN-Basic (Structure Only) & 0.79 & 0.665 & 0.63 & 0.589 & 0.95 \\
 \end{table}
 
 \paragraph{Out-of-Distribution Generalization (Homology Split).}
-To assess robustness against data leakage, we evaluated the model on the strict 40\% identity split. In this challenging zero-shot setting, PocketGNN maintains a Pearson correlation of \textbf{0.632} (with $R^2=0.379$). While the $R^2$ drop reflects the inherent difficulty of predicting kinetic rates for unseen enzyme families (OOD), the moderate-to-high correlation confirms that the model has learned generalizable physicochemical trends rather than merely memorizing sequence motifs. Notably, this performance is competitive with or superior to reported values for similar tasks under strict splitting, underscoring the value of our geometry-enhanced representation.
+To assess robustness against data leakage, we evaluated the model on the strict 40\% identity split. In this challenging zero-shot setting, PocketGNN maintains a Pearson correlation of \textbf{0.667} (with $R^2=0.437$). The $R^2$ drop reflects the inherent difficulty of predicting kinetic rates for unseen enzyme families, while the moderate-to-high correlation indicates that the model captures generalizable physicochemical trends rather than merely memorizing sequence motifs.
+
+\paragraph{Comparison with State-of-the-Art Methods.}
+We compared PocketGNN against recent SOTA methods on the same 40\% homology split test set (Table \ref{tab:sota_comparison}). PocketGNN achieves a Pearson correlation of 0.667, outperforming CatPred (0.52) and CataPro (0.497) by significant margins (28.7\% and 34.2\% relative improvement, respectively). This demonstrates the value of our pocket-centric geometric representation combined with cross-modal fusion, particularly in challenging OOD scenarios where sequence similarity is low.
+
+\begin{table}[h]
+\centering
+\caption{Comparison with SOTA methods on 40\% homology OOD split.}
+\label{tab:sota_comparison}
+\begin{tabular}{lcc}
+\toprule
+Method & Pearson $r$ & $R^2$ \\
+\midrule
+CatPred (2025)~\citep{catpred} & 0.52 & 0.27 \\
+CataPro (2025)~\citep{catapro} & 0.497 & - \\
+\textbf{PocketGNN (Ours)} & \textbf{0.667} & \textbf{0.437} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 Figure \ref{fig:scatter} visualizes the correlation between predicted and ground truth values, showing tight clustering along the diagonal.
 
@@ -184,20 +203,36 @@ The visualization (Figure \ref{fig:case_study}) shows that the model assigns hig
     \label{fig:case_study}
 \end{figure}
 
-\subsection{Limitations}
+\subsection{Code and Data Availability}
+All code, trained models, and processed datasets are available at \url{https://github.com/RektonLee/PGNN_final}. The raw data is derived from IntEnzyDB~\citep{yan2022intenzydb}, a publicly available database. Pre-trained models and processed datasets are available upon reasonable request.
+
+\subsection{Limitations and Future Work}
 \label{sec:limitations}
-Our study focuses on a curated high-quality dataset, and performance on low-quality or incomplete data remains to be tested. Additionally, while the homology split demonstrates generalization capability, the drop in $R^2$ indicates room for improvement in transfer learning across disparate enzyme families. Future work could explore pre-training strategies specifically for pocket geometries to further bridge this gap.
+Our study has several limitations that warrant future investigation:
+
+\begin{itemize}
+    \item \textbf{Experimental Conditions}: Unlike MPEK~\citep{mpek2024}, we do not explicitly model temperature, pH, or organism-specific effects. This may limit accuracy when predicting kinetics under conditions different from training data.
+    
+    \item \textbf{Uncertainty Quantification}: Unlike CatPred~\citep{catpred}, we do not provide prediction confidence intervals. Future work will incorporate quantile regression or ensemble-based uncertainty estimation.
+    
+    \item \textbf{Multi-substrate Reactions}: Our current framework handles single-substrate reactions. Extending to multi-substrate systems (e.g., reactant concatenation as in CatPred) would broaden applicability.
+    
+    \item \textbf{Docking Dependency}: The quality of pocket extraction depends on DiffDock's accuracy. Future work will explore alternative docking methods (e.g., Chai-1) and pose validation strategies to improve robustness.
+    
+    \item \textbf{Data Quality}: Our study focuses on a curated high-quality dataset, and performance on low-quality or incomplete data remains to be tested.
+\end{itemize}
+
+While the homology split demonstrates generalization capability, the drop in $R^2$ indicates room for improvement in transfer learning across disparate enzyme families. Future work could explore pre-training strategies specifically for pocket geometries to further bridge this gap.
 
 \section{Conclusion}
 \label{sec:conclusion}
 
-PocketGNN represents a step forward in \emph{cross-modal} enzyme modeling. By fusing the "short-range" precision of geometry-enhanced pocket graphs with the "long-range" breadth of protein language models, we achieve high-accuracy kinetic predictions ($r=0.98$). Our rigorous evaluation under strict homology splitting further confirms that the model captures genuine physical signals ($r=0.63$) beyond sequence memorization. This framework highlights the necessity of treating enzymes as both physical objects (3D) and evolutionary products (1D) to fully decode their catalytic potential.
+PocketGNN represents a step forward in \emph{cross-modal} enzyme modeling. By fusing the "short-range" precision of geometry-enhanced pocket graphs with the "long-range" breadth of protein language models, we achieve high-accuracy kinetic predictions ($r=0.98$). Our rigorous evaluation under strict homology splitting further confirms that the model captures genuine physical signals ($r=0.67$) beyond sequence memorization, outperforming recent SOTA methods by significant margins. This framework highlights the necessity of treating enzymes as both physical objects (3D) and evolutionary products (1D) to fully decode their catalytic potential.
 
 % =======================================================
 % REFERENCES
 % =======================================================
-\bibliographystyle{unsrt}
-\begin{thebibliography}{10}
+\begin{thebibliography}{16}
 
 \bibitem{srinivasan2023guide}
 Srinivasan B. A guide to enzyme kinetics in early drug discovery. \textit{FEBS Journal}, 2023, 290(9): 2292-2305.
@@ -240,6 +275,12 @@ Trott O, Olson AJ. AutoDock Vina: improving the speed and accuracy of docking wi
 
 \bibitem{velickovic2018graph}
 Velickovic P, Cucurull G, Casanova A, et al. Graph Attention Networks. \textit{ICLR}, 2018.
+
+\bibitem{diffdock2023}
+Corso G, Stärk H, Jing B, et al. DiffDock: Diffusion Steps, Twists, and Turns for Molecular Docking. \textit{ICLR}, 2023.
+
+\bibitem{mpek2024}
+Gao J, et al. MPEK: a multitask deep learning framework based on pretrained language models for enzymatic reaction kinetic parameters prediction. \textit{PubMed}, 2024.
 
 \end{thebibliography}
 

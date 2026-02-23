@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 def quantile_loss(pred, target, quantiles=[0.05, 0.5, 0.95], weights=None):
     """

@@ -1,4 +1,6 @@
+# ============================================
 # Python
+# ============================================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -6,65 +8,106 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-Diffdock/
-# Data (CRITICAL: Do not commit large files)
+
+# ============================================
+# Data & Large Files (CRITICAL: Do not commit)
+# ============================================
 data/
 results/
 outputs/
 output/
 sample_data/
+experiments/
+
+# Serialized models and datasets
 *.pt
 *.pth
+*.ckpt
+*.safetensors
+
+# Molecular structure files
 *.pdb
 *.pdbqt
 *.sdf
 *.mol2
+
+# Tabular data
 *.csv
 *.xlsx
+*.tsv
+runs_registry.csv
 
-# Logs and temporary files
+# ============================================
+# External Tools & Dependencies
+# ============================================
+DiffDock/
+Diffdock/
+benchmark_tools/
+
+# ============================================
+# Generated Outputs
+# ============================================
+# Images and plots (except whitelisted paper figures)
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+!paperwriting/gemini.pdf
+!paperwriting/figures/*.pdf
+!paperwriting/figures/*.png
+
+# Figures directory (except README)
+figures/*
+!figures/README.md
+!figures/archived/README.md
+
+# ============================================
+# Logs & Temporary Files
+# ============================================
 logs/
 tmp/
 *.log
 *.out
 *.err
+
+# LaTeX auxiliary files
 *.aux
 *.synctex.gz
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
 
-# Experiments and outputs
-experiments/
-runs_registry.csv
-
-# External tools (should be managed separately)
-DiffDock/
-benchmark_tools/
-
-# Generated images and plots
-*.png
-*.jpg
-*.jpeg
-*.pdf
-!paperwriting/gemini.pdf
-*.svg
-
-# Environment
+# ============================================
+# Environment & Tools
+# ============================================
 .env
 .venv
 env/
 venv/
 wandb/
 
-# IDE
+# ============================================
+# IDE & Editor
+# ============================================
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.DS_Store
 
-# Notebooks
+# ============================================
+# Jupyter Notebooks
+# ============================================
 .ipynb_checkpoints
 notebooks/*.ipynb
+# Whitelist specific notebooks if needed:
+# !notebooks/example.ipynb
 
-# OS
-.DS_Store
+# ============================================
+# OS-specific
+# ============================================
 Thumbs.db
+.DS_Store

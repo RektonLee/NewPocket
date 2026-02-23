@@ -8,11 +8,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import sys
 import shutil
 from typing import Optional, Tuple
 
 import pandas as pd
 import torch
+
+# Add src/ to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from build_graph_dataset import enhanced_build_graph
 from graph_builder_rbf import parse_pocket
@@ -139,6 +143,8 @@ def main() -> None:
                         help="Override DiffDock python interpreter (sets DIFFDOCK_PYTHON)")
     parser.add_argument("--no-validate", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--skip-docking", action="store_true",
+                        help="Only build graphs from existing pocket PDBs; skip docking if missing")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--skip-register", action="store_true")
     parser.add_argument("--shard-index", type=int, default=None,
@@ -175,7 +181,6 @@ def main() -> None:
 
     dataset = []
     successful_rows = []
-    total = len(df)
     success_count = 0
     fail_count = 0
     keep_count = 0
@@ -194,6 +199,17 @@ def main() -> None:
         df = df.iloc[[i for i in range(len(df)) if i % args.shard_count == args.shard_index]]
         df = df.reset_index(drop=True)
 
+    if args.skip_docking:
+        def _has_pocket(row):
+            sample_id = str(row["sample_id"])
+            smiles = str(row["smiles"])
+            pocket_name = compute_pocket_name(sample_id, smiles, args.pocket_cutoff)
+            pocket_pdb = sample_manager.get_docking_dir(sample_id) / pocket_name
+            return pocket_pdb.exists()
+        df = df[df.apply(_has_pocket, axis=1)].reset_index(drop=True)
+
+    total = len(df)
+
     for idx, row in enumerate(df.iterrows(), start=1):
         row = row[1]
         sample_id = str(row["sample_id"])
@@ -209,9 +225,15 @@ def main() -> None:
         pocket_name = compute_pocket_name(sample_id, smiles, args.pocket_cutoff)
         pocket_pdb = docking_dir / pocket_name
 
-        if pocket_pdb.exists() and not args.overwrite:
+        cached_pocket = pocket_pdb.exists() and not args.overwrite
+        if cached_pocket:
             dock_ok = True
         else:
+            if args.skip_docking:
+                sample_manager.log_failure(sample_id, "docking", "missing_pocket", len(sequence))
+                fail_count += 1
+                print(f"[{idx}/{total}] {sample_id} missing_pocket | gpu {gpu_id} | success {success_count} fail {fail_count}")
+                continue
             if args.method == "diffdock":
                 dock_ok = dock_with_diffdock(
                     sample_id=sample_id,
@@ -279,9 +301,15 @@ def main() -> None:
             success_count += 1
             if keep_full:
                 keep_count += 1
-                print(f"[{idx}/{total}] {sample_id} ok (kept tmp) | gpu {gpu_id} | success {success_count} fail {fail_count}")
+                if cached_pocket:
+                    print(f"[{idx}/{total}] {sample_id} ok (cached, kept tmp) | gpu {gpu_id} | success {success_count} fail {fail_count}")
+                else:
+                    print(f"[{idx}/{total}] {sample_id} ok (docked, kept tmp) | gpu {gpu_id} | success {success_count} fail {fail_count}")
             else:
-                print(f"[{idx}/{total}] {sample_id} ok | gpu {gpu_id} | success {success_count} fail {fail_count}")
+                if cached_pocket:
+                    print(f"[{idx}/{total}] {sample_id} ok (cached) | gpu {gpu_id} | success {success_count} fail {fail_count}")
+                else:
+                    print(f"[{idx}/{total}] {sample_id} ok (docked) | gpu {gpu_id} | success {success_count} fail {fail_count}")
         except Exception as e:
             err_str = str(e)
             if "Invariant Violation" in err_str or "UFFTYPER" in err_str:

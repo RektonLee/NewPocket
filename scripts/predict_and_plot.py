@@ -8,6 +8,11 @@ from sklearn.metrics import r2_score, mean_squared_error
 from scipy.stats import pearsonr
 import os
 import argparse
+import sys
+
+# Add src/ to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
 import GNN_model as MD
 from torch_geometric.loader import DataLoader
 

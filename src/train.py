@@ -286,10 +286,13 @@ def train(args):
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
     # ========== 初始化 WandB ==========
-    # 登录 wandb（使用提供的 API key）
-    wandb.login(key="46dbe55e52d029976ffa0e29c90f0d32410e1504")
+    # 优先使用环境变量 WANDB_API_KEY，避免在代码中硬编码
+    if os.environ.get("WANDB_API_KEY"):
+        wandb.login(key=os.environ["WANDB_API_KEY"])
+    else:
+        wandb.login()  # 使用本地 wandb login 的配置
     
-    # 创建 wandb config 字典
+    # 创建 wandb config 字典（使用 args 中的超参，避免在未赋值前引用）
     dataset_name = os.path.basename(dataset_path) if dataset_path else "custom_split"
     wandb_config = {
         "dataset": dataset_name,
@@ -304,9 +307,9 @@ def train(args):
         "pooling_type": args.pooling_type,
         "use_seq_embedding": args.use_seq_embedding,
         "model_type": model_type,  # 记录模型类型
-        "hidden_dim": hidden_dim,
-        "num_layers": num_layers,
-        "heads": heads,
+        "hidden_dim": args.hidden_dim,
+        "num_layers": args.num_layers,
+        "heads": args.heads,
         "split_strategy": split_strategy,
         "train_dataset": args.train_dataset,
         "val_dataset": args.val_dataset,
@@ -578,6 +581,19 @@ def train(args):
             use_seq_embedding=args.use_seq_embedding,
             seq_embedding_dim=seq_embedding_dim if args.use_seq_embedding else 0,
             pooling_type='mean'  # PHPTransformer目前只支持mean pooling
+        ).to(device)
+    elif model_type == 'PocketEGNNKcatOnly':
+        print(f"🧬 Using {model_type} (EGNN pocket encoder)")
+        model = MD.PocketEGNNKcatOnly(
+            node_input_dim=node_input_dim,
+            edge_input_dim=edge_input_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout,
+            pooling_type=args.pooling_type,
+            use_seq_embedding=args.use_seq_embedding,
+            seq_embedding_dim=seq_embedding_dim if args.use_seq_embedding else 0,
+            output_quantiles=use_quantile
         ).to(device)
     else:
         print(f"📊 Using {model_type} (Baseline single-stream GAT)")
@@ -1298,8 +1314,8 @@ if __name__ == '__main__':
     
     # Model Architecture Hyperparameters
     parser.add_argument('--model_type', type=str, default='PocketGNNKcatOnly',
-                       choices=['PocketGNNKcatOnly', 'PHPTransformer'],
-                       help='Model architecture: PocketGNNKcatOnly (baseline) or PHPTransformer (dual-stream hierarchical)')
+                      choices=['PocketGNNKcatOnly', 'PocketEGNNKcatOnly', 'PHPTransformer'],
+                      help='Model architecture: PocketGNNKcatOnly (baseline), PocketEGNNKcatOnly (EGNN), or PHPTransformer (dual-stream hierarchical)')
     parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension')
     parser.add_argument('--num_layers', type=int, default=3, help='Number of GNN layers')
     parser.add_argument('--heads', type=int, default=4, help='Number of attention heads')
