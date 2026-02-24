@@ -1,7 +1,7 @@
 # PocketGNN 项目文档
 
-> **最后更新**: 2024-02-24
-> **项目状态**: 论文撰写阶段
+> **最后更新**: 2026-02-24
+> **项目状态**: 实验进行中 - DiffDock批量对接 + 模型训练
 > **负责人**: 李子豪 (清华大学化工系)
 
 ---
@@ -203,7 +203,19 @@ PGNN_clean/
 - [x] DiffDock vs Vina RMSD验证实验
 - [x] 论文初稿完成
 
-### 6.2 进行中
+### 6.2 进行中 (2026-02-24)
+
+- [x] **DiffDock批量对接训练集** - 4 GPU并行处理中
+  - 总样本: 9061 (kcat_full_1213.csv)
+  - 有PDB结构: 4072 (45%)
+  - 无PDB结构: 4989 (55%) - 需要ESMFold预测
+  - 预计完成: 2026-02-25 中午
+  - 进度监控: `python scripts/check_diffdock_progress.py`
+
+- [x] **自动化训练pipeline** - 运行中
+  - 等待DiffDock完成 → 自动构建数据集 → 自动训练模型 → 自动评估
+  - 脚本: `scripts/auto_pipeline.py`
+  - 日志: `logs/auto_pipeline.log`
 
 - [ ] 论文修订（根据实验结果调整claims）
 - [ ] 补充更多ablation实验
