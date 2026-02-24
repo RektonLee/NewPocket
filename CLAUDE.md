@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **See also**: `PROJECT_DOCUMENTATION.md` for comprehensive project documentation including background, literature review, experimental results, and progress tracking. That document is the single source of truth for project status.
+
 ---
 
 ## Project Overview
