@@ -23,7 +23,61 @@
 
 ## 🚀 最新进展 (2026-02-24)
 
-### ✅ DiffDock对接验证完成
+### ✅ 1. DiffDock vs AutoDock Vina RMSD对比实验
+
+**执行时间**: 2026-02-24 凌晨
+**测试数据**: PoseBench Astex Diverse Set (5个复合物)
+**方法**: 重新对接并计算与晶体结构的RMSD
+
+**实验结果**:
+
+| 方法 | 成功率 (RMSD<2Å) | 平均RMSD | 标准差 |
+|------|------------------|----------|--------|
+| **AutoDock Vina** | **100%** (5/5) | **1.31Å** | 0.61Å |
+| **DiffDock** | 80% (4/5) | 1.69Å | 1.19Å |
+
+**逐样本对比**:
+| Complex | Vina RMSD | DiffDock RMSD | 胜者 |
+|---------|-----------|---------------|------|
+| 1G9V | 1.83Å | 3.91Å | Vina |
+| 1GKC | 1.73Å | 1.70Å | DiffDock |
+| 1GM8 | 1.81Å | 1.22Å | DiffDock |
+| 1GPK | 0.90Å | 0.38Å | DiffDock |
+| 1HNN | 0.30Å | 1.23Å | Vina |
+
+**结论**: 在这5个样本上，Vina整体表现更稳定（100%成功率），但DiffDock在部分样本上达到更低的RMSD。两种方法各有3:2的胜率。
+
+**文件位置**:
+- Vina结果: `results/docking_rmsd_test/vina_rmsd_results.csv`
+- DiffDock结果: `results/diffdock_rmsd_test/diffdock_rmsd_results.csv`
+- 对比图表: `results/docking_comparison/diffdock_vs_vina_comparison.png`
+
+---
+
+### ✅ 2. 口袋表征质量评估
+
+**方法**: 无监督聚类指标（Silhouette Score, Davies-Bouldin Index）
+**测试数据**: kcat_merged_hom40_test.pt (300样本)
+
+**实验结果** (K=5聚类):
+
+| 表征方法 | Silhouette | Davies-Bouldin |
+|----------|------------|----------------|
+| 简单5Å均值池化 | 0.114 | 2.249 |
+| 增强24D边特征 | 0.101 | **1.869** |
+
+**结论**:
+- Silhouette分数相近，简单方法略高
+- Davies-Bouldin指数（越低越好）增强特征更优
+- 两种方法在无监督任务上差异不显著
+
+**文件位置**:
+- 可视化: `results/representation_comparison/representation_comparison.png`
+- 数据: `results/representation_comparison/representation_comparison.csv`
+
+---
+
+### ✅ 3. DiffDock对接质量验证（已有数据）
 
 **执行时间**: 2026-02-24 凌晨
 **负责人**: Claude Code (自动化)
