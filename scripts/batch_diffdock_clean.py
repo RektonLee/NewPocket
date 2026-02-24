@@ -71,13 +71,17 @@ def run_diffdock_sample(sample_id: str, protein_pdb: Path, smiles: str) -> dict:
             "--no_final_step_noise"
         ]
 
+        import os
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+
         result = subprocess.run(
             cmd,
             cwd=str(DIFFDOCK_DIR),
             capture_output=True,
             text=True,
             timeout=180,
-            env={"CUDA_VISIBLE_DEVICES": "0"}
+            env=env
         )
 
         # Copy output
