@@ -1,49 +1,41 @@
 #!/bin/bash
-# Launch 4 parallel DiffDock workers on different GPUs
+# Launch 4 workers for samples that have PDB files (0-4072)
 
 cd /home/lizihao/Work/enzyme_prediction/PGNN_clean
 
-# Create logs directory
 mkdir -p logs
 
-# Kill any existing background processes
-pkill -f "batch_diffdock_clean.py" || true
+echo "Starting 4 workers for samples with PDB (total 4072)..."
 
-echo "Starting 4 parallel DiffDock workers..."
-
-# GPU 0: samples 0-2265
+# Each GPU gets ~1018 samples
+# GPU 0: 0-1018
 CUDA_VISIBLE_DEVICES=0 nohup python scripts/batch_diffdock_clean.py \
-  --start_from 0 --max_samples 2265 \
+  --start_from 0 --max_samples 1018 \
   > logs/diffdock_gpu0.log 2>&1 &
-echo "GPU 0: PID $! (samples 0-2265)"
+echo "GPU 0: PID $! (samples 0-1018)"
 
-# GPU 1: samples 2265-4530
+# GPU 1: 1018-2036
 CUDA_VISIBLE_DEVICES=1 nohup python scripts/batch_diffdock_clean.py \
-  --start_from 2265 --max_samples 2265 \
+  --start_from 1018 --max_samples 1018 \
   > logs/diffdock_gpu1.log 2>&1 &
-echo "GPU 1: PID $! (samples 2265-4530)"
+echo "GPU 1: PID $! (samples 1018-2036)"
 
-# GPU 2: samples 4530-6795
+# GPU 2: 2036-3054
 CUDA_VISIBLE_DEVICES=2 nohup python scripts/batch_diffdock_clean.py \
-  --start_from 4530 --max_samples 2265 \
+  --start_from 2036 --max_samples 1018 \
   > logs/diffdock_gpu2.log 2>&1 &
-echo "GPU 2: PID $! (samples 4530-6795)"
+echo "GPU 2: PID $! (samples 2036-3054)"
 
-# GPU 3: samples 6795-9062
+# GPU 3: 3054-4072
 CUDA_VISIBLE_DEVICES=3 nohup python scripts/batch_diffdock_clean.py \
-  --start_from 6795 --max_samples 2267 \
+  --start_from 3054 --max_samples 1018 \
   > logs/diffdock_gpu3.log 2>&1 &
-echo "GPU 3: PID $! (samples 6795-9062)"
+echo "GPU 3: PID $! (samples 3054-4072)"
 
-sleep 2
+sleep 3
 
 echo ""
-echo "All workers launched!"
-echo "Monitor progress with:"
-echo "  tail -f logs/diffdock_gpu*.log"
+echo "✅ All 4 workers launched for 4072 samples with PDB!"
 echo ""
-echo "Check running processes:"
-echo "  ps aux | grep batch_diffdock_clean"
-echo ""
-echo "Check progress:"
-echo "  python scripts/check_diffdock_progress.py"
+echo "Monitor: python scripts/check_diffdock_progress.py"
+echo "Stop: bash scripts/stop_diffdock.sh"
