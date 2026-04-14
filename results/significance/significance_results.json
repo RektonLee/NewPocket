@@ -1,0 +1,182 @@
+{
+  "config": {
+    "n_boot": 2000,
+    "n_perm": 5000,
+    "seed": 20260315
+  },
+  "method_sizes": {
+    "PocketGNN": 3444,
+    "CatPred": 3439,
+    "CataPro": 1455
+  },
+  "comparisons": {
+    "PocketGNN_vs_CatPred": {
+      "method_a": "PocketGNN",
+      "method_b": "CatPred",
+      "n_samples": 3439,
+      "method_a_metrics": {
+        "pearson": 0.8643374296462957,
+        "r2": 0.745304547334779,
+        "mae": 0.4786939697508999,
+        "rmse": 0.7754832343952255
+      },
+      "method_b_metrics": {
+        "pearson": 0.6078222971474158,
+        "r2": 0.16449981108986045,
+        "mae": 0.9422568252752741,
+        "rmse": 1.4045431746420374
+      },
+      "advantage_definition": "positive => method_a better",
+      "metrics": {
+        "pearson": {
+          "advantage": 0.2565151324988799,
+          "bootstrap_ci_95": [
+            0.23106502393221226,
+            0.28318456970781003
+          ],
+          "permutation_pvalue": 0.0001999600079984003,
+          "significant_alpha_0_05": true
+        },
+        "r2": {
+          "advantage": 0.5808047362449186,
+          "bootstrap_ci_95": [
+            0.5233475200106238,
+            0.6430120985917863
+          ],
+          "permutation_pvalue": 0.0001999600079984003,
+          "significant_alpha_0_05": true
+        },
+        "mae": {
+          "advantage": 0.4635628555243742,
+          "bootstrap_ci_95": [
+            0.4273679904450449,
+            0.49744095713231273
+          ],
+          "permutation_pvalue": 0.0001999600079984003,
+          "significant_alpha_0_05": true
+        },
+        "rmse": {
+          "advantage": 0.6290599402468119,
+          "bootstrap_ci_95": [
+            0.572378966304791,
+            0.682787442589514
+          ],
+          "permutation_pvalue": 0.0001999600079984003,
+          "significant_alpha_0_05": true
+        }
+      }
+    },
+    "PocketGNN_vs_CataPro": {
+      "method_a": "PocketGNN",
+      "method_b": "CataPro",
+      "n_samples": 1455,
+      "method_a_metrics": {
+        "pearson": 0.8679217603066404,
+        "r2": 0.7521499239040748,
+        "mae": 0.4870069435684017,
+        "rmse": 0.7870984688037727
+      },
+      "method_b_metrics": {
+        "pearson": 0.6826551856116473,
+        "r2": 0.4444476620568161,
+        "mae": 0.8920230478725214,
+        "rmse": 1.1784116545149121
+      },
+      "advantage_definition": "positive => method_a better",
+      "metrics": {
+        "pearson": {
+          "advantage": 0.18526657469499308,
+          "bootstrap_ci_95": [
+            0.15274332828239376,
+            0.21759598401179583
+          ],
+          "permutation_pvalue": 0.0001999600079984003,
+          "significant_alpha_0_05": true
+        },
+        "r2": {
+          "advantage": 0.3077022618472587,
+          "bootstrap_ci_95": [
+            0.26166903183064566,
+            0.353321455787956
+          ],
+          "permutation_pvalue": 0.0001999600079984003,
+          "significant_alpha_0_05": true
+        },
+        "mae": {
+          "advantage": 0.4050161043041197,
+          "bootstrap_ci_95": [
+            0.3634657441786029,
+            0.4485745098840412
+          ],
+          "permutation_pvalue": 0.0001999600079984003,
+          "significant_alpha_0_05": true
+        },
+        "rmse": {
+          "advantage": 0.3913131857111395,
+          "bootstrap_ci_95": [
+            0.32212600308067635,
+            0.4620064043234576
+          ],
+          "permutation_pvalue": 0.0001999600079984003,
+          "significant_alpha_0_05": true
+        }
+      }
+    },
+    "CatPred_vs_CataPro": {
+      "method_a": "CatPred",
+      "method_b": "CataPro",
+      "n_samples": 1454,
+      "method_a_metrics": {
+        "pearson": 0.6107525377577864,
+        "r2": 0.16456667518537482,
+        "mae": 0.9838825100739736,
+        "rmse": 1.445154608918387
+      },
+      "method_b_metrics": {
+        "pearson": 0.682628018776083,
+        "r2": 0.44442975844612576,
+        "mae": 0.8919147048438573,
+        "rmse": 1.1784954291305292
+      },
+      "advantage_definition": "positive => method_a better",
+      "metrics": {
+        "pearson": {
+          "advantage": -0.07187548101829666,
+          "bootstrap_ci_95": [
+            -0.11133908386996785,
+            -0.03341175719899872
+          ],
+          "permutation_pvalue": 0.003199360127974405,
+          "significant_alpha_0_05": true
+        },
+        "r2": {
+          "advantage": -0.27986308326075093,
+          "bootstrap_ci_95": [
+            -0.363632852169495,
+            -0.2002518320437219
+          ],
+          "permutation_pvalue": 0.0001999600079984003,
+          "significant_alpha_0_05": true
+        },
+        "mae": {
+          "advantage": -0.09196780523011638,
+          "bootstrap_ci_95": [
+            -0.144659634665987,
+            -0.03737761768849476
+          ],
+          "permutation_pvalue": 0.0007998400319936012,
+          "significant_alpha_0_05": true
+        },
+        "rmse": {
+          "advantage": -0.2666591797878579,
+          "bootstrap_ci_95": [
+            -0.33346569205602056,
+            -0.19638891887356735
+          ],
+          "permutation_pvalue": 0.0001999600079984003,
+          "significant_alpha_0_05": true
+        }
+      }
+    }
+  }
+}

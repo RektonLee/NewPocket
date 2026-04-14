@@ -1,0 +1,22 @@
+{
+  "test_metrics": {
+    "MAE": 0.9005305171012878,
+    "RMSE": 1.1973800659179688,
+    "R2": 0.3871581554412842,
+    "Pearson": 0.7160169414479142
+  },
+  "test_samples": 898,
+  "model_path": "outputs/kcat_enhanced_run/best_model.pt",
+  "test_dataset_path": "data/processed/kcat_merged_hom40_test.pt",
+  "model_config": {
+    "node_input_dim": 52,
+    "edge_input_dim": 24,
+    "hidden_dim": 128,
+    "num_layers": 3,
+    "heads": 4,
+    "dropout": 0.3,
+    "pooling_type": "set2set",
+    "use_seq_embedding": true,
+    "seq_embedding_dim": 640
+  }
+}
